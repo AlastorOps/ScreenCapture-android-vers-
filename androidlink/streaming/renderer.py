@@ -1,5 +1,5 @@
 import numpy as np
-from PySide6.QtCore import QPointF, QSize, Qt
+from PySide6.QtCore import QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -24,6 +24,11 @@ class VideoRenderWidget(QWidget):
     full-frame copy on every frame (prompt.md section 34: minimize copies).
     """
 
+    # Real measured value, ticked once per second (prompt.md section 20/34:
+    # never fabricate a performance number) -- counts actual paintEvent()
+    # calls, not frames received, so it reflects what the user visually sees.
+    render_fps_updated = Signal(float)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._frame_buffer: np.ndarray | None = None
@@ -32,6 +37,16 @@ class VideoRenderWidget(QWidget):
         # Focusable-by-click so KeyboardInputHandler (input/keyboard.py) only
         # receives key events while this widget is the focused one.
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        self._painted_frame_count = 0
+        self._fps_timer = QTimer(self)
+        self._fps_timer.setInterval(1000)
+        self._fps_timer.timeout.connect(self._emit_render_fps)
+        self._fps_timer.start()
+
+    def _emit_render_fps(self) -> None:
+        self.render_fps_updated.emit(float(self._painted_frame_count))
+        self._painted_frame_count = 0
 
     def set_frame(self, frame: np.ndarray) -> None:
         if not frame.flags["C_CONTIGUOUS"]:
@@ -76,3 +91,4 @@ class VideoRenderWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         target_rect = compute_video_rect(self.size(), self._image.size())
         painter.drawImage(target_rect, self._image)
+        self._painted_frame_count += 1

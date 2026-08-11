@@ -40,3 +40,18 @@ class VirtualCameraSink:
 
     def close(self) -> None:
         self._camera.close()
+
+
+def detect_backend_available() -> bool:
+    """Non-invasive probe for the setup wizard (prompt.md section 18):
+    true if a Windows virtual camera backend is installed, without
+    actually starting a mirroring session. There's no separate "list
+    installed backends" API in pyvirtualcam -- opening (and immediately
+    closing) a minimal camera is the only way to find out, the same way
+    VirtualCameraSink itself discovers availability lazily."""
+    try:
+        camera = pyvirtualcam.Camera(width=2, height=2, fps=1)
+    except RuntimeError:
+        return False
+    camera.close()
+    return True

@@ -15,12 +15,15 @@ class BasePanel(QFrame):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        title_label = QLabel(title.upper())
-        title_label.setProperty("role", "panel-title")
-        outer.addWidget(title_label)
+        self._title_label = QLabel(title.upper())
+        self._title_label.setProperty("role", "panel-title")
+        outer.addWidget(self._title_label)
 
         content = QWidget()
         self.content_layout = QVBoxLayout(content)
         self.content_layout.setContentsMargins(10, 10, 10, 10)
         self.content_layout.setSpacing(8)
         outer.addWidget(content, stretch=1)
+
+    def set_title_visible(self, visible: bool) -> None:
+        self._title_label.setVisible(visible)

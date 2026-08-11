@@ -4,6 +4,7 @@ from PySide6.QtCore import QObject
 
 from androidlink.audio.mic_session import MicSession
 from androidlink.device.manager import DeviceManager
+from androidlink.settings.manager import SettingsManager
 from androidlink.streaming.controller import SERVER_JAR_RELATIVE_PATH
 from androidlink.streaming.protocol import AUDIO_SOURCE_MIC
 from androidlink.ui.panels.device_panel import DevicePanel
@@ -23,21 +24,26 @@ class MicController(QObject):
         self,
         device_manager: DeviceManager,
         device_panel: DevicePanel,
+        settings_manager: SettingsManager,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._device_manager = device_manager
         self._device_panel = device_panel
+        self._settings_manager = settings_manager
         self._session: MicSession | None = None
 
-        self._audio_source = AUDIO_SOURCE_MIC
-        self._volume = 100
-        self._muted = False
+        settings = settings_manager.settings
+        self._audio_source = settings.microphone.audio_source
+        self._volume = settings.microphone.volume
+        self._muted = settings.microphone.muted
+        device_panel.set_initial_mic_state(self._audio_source, self._volume, self._muted)
 
         device_manager.active_device_changed.connect(self._on_active_device_changed)
         device_panel.mic_toggled.connect(self._on_mic_toggled)
         device_panel.mic_source_changed.connect(self._on_mic_source_changed)
         device_panel.mic_volume_changed.connect(self._on_mic_volume_changed)
+        device_panel.mic_volume_committed.connect(self._save_mic_volume)
         device_panel.mic_mute_toggled.connect(self._on_mic_mute_toggled)
 
     def shutdown(self) -> None:
@@ -58,16 +64,24 @@ class MicController(QObject):
         if self._session is not None:
             self._stop_mic()
             self._start_mic()
+        self._settings_manager.settings.microphone.audio_source = source
+        self._settings_manager.save()
 
     def _on_mic_volume_changed(self, value: int) -> None:
         self._volume = value
         if self._session is not None:
             self._session.set_volume(value / 100)
 
+    def _save_mic_volume(self, value: int) -> None:
+        self._settings_manager.settings.microphone.volume = value
+        self._settings_manager.save()
+
     def _on_mic_mute_toggled(self, muted: bool) -> None:
         self._muted = muted
         if self._session is not None:
             self._session.set_muted(muted)
+        self._settings_manager.settings.microphone.muted = muted
+        self._settings_manager.save()
 
     def _start_mic(self) -> None:
         device = self._device_manager.active_device

@@ -6,19 +6,46 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWi
 from androidlink.ui.panels.base_panel import BasePanel
 from androidlink.ui.widgets.status_dot import StatusDot, StatusState
 
-_METRICS = ["FPS", "Latency", "Bitrate", "Resolution"]
+# key -> display label. GPU is listed but never updated -- see
+# utils/system_stats.py's docstring for why (no reliable cross-vendor
+# reading without a substantial PDH-counter implementation); shown as a
+# permanent "—" with a tooltip rather than a fabricated number.
+_STREAM_METRICS = [
+    ("stream_fps", "Stream FPS"),
+    ("render_fps", "Render FPS"),
+    ("dropped", "Dropped Frames"),
+    ("decode", "Decode Latency"),
+    ("bitrate", "Bitrate"),
+    ("resolution", "Resolution"),
+    ("codec", "Codec"),
+]
+_SYSTEM_METRICS = [
+    ("cpu", "CPU"),
+    ("ram", "RAM"),
+    ("gpu", "GPU"),
+]
+
+
+def _format_bitrate(bps: float) -> str:
+    if bps >= 1_000_000:
+        return f"{bps / 1_000_000:.1f} Mbps"
+    if bps >= 1_000:
+        return f"{bps / 1_000:.0f} kbps"
+    return f"{bps:.0f} bps"
 
 
 class StatusPanel(BasePanel):
-    """Shows live streaming metrics and PC-side recording controls
-    (prompt.md section 14).
+    """Shows real measured streaming/system metrics (prompt.md section 20:
+    Diagnostics) and PC-side recording controls (prompt.md section 14).
 
-    Phase 1 placeholder: the FPS/Latency/Bitrate/Resolution metrics render
-    as em-dashes rather than fabricated numbers -- no measurement pipeline
-    exists yet to back them (that's Phase 9's Diagnostics work, prompt.md
-    section 20). Recording (Phase 8) is real: start/stop/pause and
-    screenshot both require an active Cast session (there's nothing to
-    record otherwise), enabled/reflected by RecordingController.
+    Every stream metric here is a genuinely measured value -- see
+    streaming/transport.py's _emit_stats(), streaming/renderer.py's render
+    FPS counter, and utils/system_stats.py's psutil sampler -- rendered as
+    "—" only while there's nothing to measure (no active Cast session), per
+    prompt.md section 33/34: never fabricate a number like "0 dropped
+    frames". Recording: start/stop/pause and screenshot both require an
+    active Cast session (there's nothing to record otherwise), enabled and
+    reflected by RecordingController.
     """
 
     record_toggled = Signal(bool)
@@ -28,21 +55,29 @@ class StatusPanel(BasePanel):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Status", parent)
 
-        for metric in _METRICS:
+        self._value_labels: dict[str, QLabel] = {}
+        for key, label_text in _STREAM_METRICS + _SYSTEM_METRICS:
             row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
 
-            label = QLabel(metric)
+            label = QLabel(label_text)
             label.setProperty("role", "muted")
 
             value = QLabel("—")
             value.setProperty("role", "mono")
+            self._value_labels[key] = value
 
             row_layout.addWidget(label)
             row_layout.addStretch(1)
             row_layout.addWidget(value)
             self.content_layout.addWidget(row)
+
+        self._value_labels["gpu"].setToolTip(
+            "GPU usage isn't measured yet -- reliable cross-vendor readings "
+            "on Windows need Performance Data Helper counter queries, not "
+            "yet implemented"
+        )
 
         self.content_layout.addSpacing(12)
         self.content_layout.addWidget(self._build_recording_controls())
@@ -52,6 +87,29 @@ class StatusPanel(BasePanel):
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._tick_elapsed)
         self._recording_start_time: float | None = None
+
+    def set_stream_stats(self, sample) -> None:
+        self._value_labels["stream_fps"].setText(f"{sample.stream_fps:.0f}")
+        self._value_labels["dropped"].setText(str(sample.dropped_frames))
+        self._value_labels["decode"].setText(f"{sample.decode_latency_ms:.1f} ms")
+        self._value_labels["bitrate"].setText(_format_bitrate(sample.bitrate_bps))
+        if sample.resolution is not None:
+            self._value_labels["resolution"].setText(
+                f"{sample.resolution[0]} × {sample.resolution[1]}"
+            )
+        if sample.codec is not None:
+            self._value_labels["codec"].setText(sample.codec.upper())
+
+    def set_render_fps(self, fps: float) -> None:
+        self._value_labels["render_fps"].setText(f"{fps:.0f}")
+
+    def set_system_stats(self, cpu_percent: float, ram_mb: float) -> None:
+        self._value_labels["cpu"].setText(f"{cpu_percent:.0f}%")
+        self._value_labels["ram"].setText(f"{ram_mb:.0f} MB")
+
+    def reset_stream_stats(self) -> None:
+        for key in ("stream_fps", "render_fps", "dropped", "decode", "bitrate", "resolution", "codec"):
+            self._value_labels[key].setText("—")
 
     def _build_recording_controls(self) -> QWidget:
         container = QWidget()

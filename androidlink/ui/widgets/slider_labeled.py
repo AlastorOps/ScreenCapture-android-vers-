@@ -6,6 +6,7 @@ class LabeledSlider(QWidget):
     """A horizontal slider with a label at each end (e.g. Performance <-> Quality)."""
 
     valueChanged = Signal(int)
+    committed = Signal()  # fires once when the user releases the slider (for persistence)
 
     def __init__(
         self,
@@ -32,6 +33,7 @@ class LabeledSlider(QWidget):
         self._slider.setMaximum(maximum)
         self._slider.setValue(value)
         self._slider.valueChanged.connect(self.valueChanged)
+        self._slider.sliderReleased.connect(self.committed)
 
         layout.addWidget(left)
         layout.addWidget(self._slider, stretch=1)

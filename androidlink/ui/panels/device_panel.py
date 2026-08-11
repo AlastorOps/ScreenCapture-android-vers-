@@ -69,6 +69,7 @@ class DevicePanel(BasePanel):
     control_toggled = Signal(bool)
     audio_toggled = Signal(bool)
     audio_volume_changed = Signal(int)  # 0-100
+    audio_volume_committed = Signal(int)  # fires once on slider release, for persistence
     audio_mute_toggled = Signal(bool)
     camera_toggled = Signal(bool)
     camera_selection_changed = Signal(str)  # camera_id
@@ -76,6 +77,7 @@ class DevicePanel(BasePanel):
     mic_toggled = Signal(bool)
     mic_source_changed = Signal(str)  # AUDIO_SOURCE_* value
     mic_volume_changed = Signal(int)  # 0-100
+    mic_volume_committed = Signal(int)  # fires once on slider release, for persistence
     mic_mute_toggled = Signal(bool)
 
     def __init__(self, device_manager: DeviceManager, parent: QWidget | None = None) -> None:
@@ -107,6 +109,8 @@ class DevicePanel(BasePanel):
         features_title = QLabel("FEATURES")
         features_title.setProperty("role", "muted")
         self.content_layout.addWidget(features_title)
+
+        self._audio_desired_enabled = False  # set for real by set_initial_audio_state()
 
         self._feature_toggles: dict[str, ToggleSwitch] = {}
         for feature in _FEATURES:
@@ -181,6 +185,9 @@ class DevicePanel(BasePanel):
         self._volume_slider.setValue(100)
         self._volume_slider.setEnabled(False)
         self._volume_slider.valueChanged.connect(self.audio_volume_changed)
+        self._volume_slider.sliderReleased.connect(
+            lambda: self.audio_volume_committed.emit(self._volume_slider.value())
+        )
 
         volume_layout.addWidget(volume_label)
         volume_layout.addWidget(self._volume_slider, stretch=1)
@@ -292,6 +299,9 @@ class DevicePanel(BasePanel):
         self._mic_volume_slider.setValue(100)
         self._mic_volume_slider.setEnabled(False)
         self._mic_volume_slider.valueChanged.connect(self.mic_volume_changed)
+        self._mic_volume_slider.sliderReleased.connect(
+            lambda: self.mic_volume_committed.emit(self._mic_volume_slider.value())
+        )
         volume_layout.addWidget(volume_label)
         volume_layout.addWidget(self._mic_volume_slider, stretch=1)
         layout.addWidget(volume_row)
@@ -427,6 +437,7 @@ class DevicePanel(BasePanel):
         self.cast_toggled.emit(checked)
 
     def _on_audio_toggle_changed(self, checked: bool) -> None:
+        self._audio_desired_enabled = checked
         self._volume_slider.setEnabled(checked)
         self._mute_toggle.setEnabled(checked)
         if not checked:
@@ -441,7 +452,19 @@ class DevicePanel(BasePanel):
                 toggle.blockSignals(True)
                 toggle.setChecked(False)
                 toggle.blockSignals(False)
-        if not available:
+        if available:
+            # Cast just became available again -- restore Audio to its last
+            # desired state (persisted default, or whatever the user chose
+            # this session) rather than leaving it stuck unchecked from the
+            # forced-off above, which would visually lie about whether
+            # audio is actually being requested.
+            audio_toggle = self._feature_toggles["Audio"]
+            audio_toggle.blockSignals(True)
+            audio_toggle.setChecked(self._audio_desired_enabled)
+            audio_toggle.blockSignals(False)
+            self._volume_slider.setEnabled(self._audio_desired_enabled)
+            self._mute_toggle.setEnabled(self._audio_desired_enabled)
+        else:
             self._volume_slider.setEnabled(False)
             self._mute_toggle.setEnabled(False)
             self._audio_status_label.hide()
@@ -450,8 +473,13 @@ class DevicePanel(BasePanel):
         camera = self._camera_combo.currentData()
         if camera is not None:
             self.camera_selection_changed.emit(camera.camera_id)
-            self._camera_fps_combo.clear()
-            self._camera_fps_combo.addItem(_AUTOMATIC)
+            self._populate_fps_combo_for_current_camera()
+
+    def _populate_fps_combo_for_current_camera(self) -> None:
+        camera = self._camera_combo.currentData()
+        self._camera_fps_combo.clear()
+        self._camera_fps_combo.addItem(_AUTOMATIC)
+        if camera is not None:
             for fps in camera.fps_options:
                 self._camera_fps_combo.addItem(f"{fps} fps", fps)
 
@@ -472,26 +500,87 @@ class DevicePanel(BasePanel):
         self._camera_status_label.setText("Detecting cameras...")
         self._camera_status_label.show()
 
-    def set_camera_list(self, cameras: list[CameraInfo]) -> None:
+    def set_camera_list(self, cameras: list[CameraInfo]) -> CameraInfo | None:
         """Populates the Camera dropdown once detection finishes (prompt.md
-        section 11: "Detect all available cameras"; never silently fail)."""
+        section 11: "Detect all available cameras"; never silently fail).
+
+        Population is blocked from emitting camera_selection_changed: Qt
+        auto-selects index 0 as soon as the first item is added, and
+        without blocking, that non-user-initiated selection would reach
+        CameraController and get persisted as if the user had chosen it --
+        silently clobbering a real persisted selection before
+        select_camera_by_id() ever gets a chance to restore it. Returns the
+        resulting default (index 0) camera, if any, so the caller can use
+        it as a fallback when there's no persisted selection to restore.
+        """
+        self._camera_combo.blockSignals(True)
         self._camera_combo.clear()
 
         if not cameras:
+            self._camera_combo.blockSignals(False)
             self._camera_status_label.setText("No camera detected on this device.")
             self._camera_status_label.show()
             self._feature_toggles["Camera"].setEnabled(False)
             self._feature_toggles["Camera"].setToolTip("No camera detected on this device")
-            return
+            return None
 
         for camera in cameras:
             self._camera_combo.addItem(camera.display_name, camera)
+        self._camera_combo.setCurrentIndex(0)
+        self._camera_combo.blockSignals(False)
+
+        # Also block the FPS combo: populating it fires its own
+        # currentIndexChanged as items are added (same non-user-action
+        # problem as above, just one combo over).
+        self._camera_fps_combo.blockSignals(True)
+        self._populate_fps_combo_for_current_camera()
+        self._camera_fps_combo.blockSignals(False)
+
         self._camera_combo.setEnabled(True)
         self._camera_resolution_combo.setEnabled(True)
         self._camera_fps_combo.setEnabled(True)
         self._camera_status_label.hide()
         self._feature_toggles["Camera"].setEnabled(True)
         self._feature_toggles["Camera"].setToolTip("Expose the Android camera as a Windows webcam")
+        return cameras[0]
+
+    def select_camera_by_id(self, camera_id: str, fps: int) -> None:
+        """Restores a persisted camera selection (prompt.md section 29)
+        once set_camera_list() has populated real options -- if camera_id
+        isn't among them (different device, camera removed, etc.), this is
+        simply a no-op and the combo stays on whatever set_camera_list()
+        defaulted to."""
+        for i in range(self._camera_combo.count()):
+            camera = self._camera_combo.itemData(i)
+            if camera is not None and camera.camera_id == camera_id:
+                self._camera_combo.setCurrentIndex(i)
+                if fps:
+                    fps_index = self._camera_fps_combo.findData(fps)
+                    if fps_index >= 0:
+                        self._camera_fps_combo.setCurrentIndex(fps_index)
+                return
+
+    def set_initial_audio_state(self, enabled: bool, volume: int, muted: bool) -> None:
+        self._audio_desired_enabled = enabled
+        self._volume_slider.blockSignals(True)
+        self._volume_slider.setValue(volume)
+        self._volume_slider.blockSignals(False)
+        self._mute_toggle.blockSignals(True)
+        self._mute_toggle.setChecked(muted)
+        self._mute_toggle.blockSignals(False)
+
+    def set_initial_mic_state(self, source: str, volume: int, muted: bool) -> None:
+        index = self._mic_source_combo.findData(source)
+        if index >= 0:
+            self._mic_source_combo.blockSignals(True)
+            self._mic_source_combo.setCurrentIndex(index)
+            self._mic_source_combo.blockSignals(False)
+        self._mic_volume_slider.blockSignals(True)
+        self._mic_volume_slider.setValue(volume)
+        self._mic_volume_slider.blockSignals(False)
+        self._mic_mute_toggle.blockSignals(True)
+        self._mic_mute_toggle.setChecked(muted)
+        self._mic_mute_toggle.blockSignals(False)
 
     def set_camera_list_failed(self, message: str) -> None:
         self._camera_status_label.setText(message)

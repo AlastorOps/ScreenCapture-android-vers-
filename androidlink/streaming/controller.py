@@ -5,6 +5,7 @@ from PySide6.QtCore import QObject, Signal
 from androidlink.device.manager import DeviceManager
 from androidlink.input.keyboard import KeyboardInputHandler
 from androidlink.input.mouse import MouseInputHandler
+from androidlink.settings.manager import SettingsManager
 from androidlink.streaming.performance import resolve_streaming_profile
 from androidlink.streaming.transport import CastingSession
 from androidlink.ui.panels.device_panel import DevicePanel
@@ -28,28 +29,35 @@ class CastingController(QObject):
     them while already casting restarts the session with the new flags.
     """
 
-    cast_session_started = Signal(int, int, int)  # width, height, target_fps
+    cast_session_started = Signal(int, int, int, bool)  # width, height, target_fps, audio_enabled
     cast_session_stopped = Signal()
     frame_ready = Signal(object)  # decoded RGB24 ndarray, e.g. for recording/screenshots
+    audio_pcm_ready = Signal(bytes)  # decoded PCM (48kHz stereo s16), e.g. for recording
+    stats_updated = Signal(object)  # DiagnosticsSample, see streaming/diagnostics.py
 
     def __init__(
         self,
         device_manager: DeviceManager,
         device_panel: DevicePanel,
         screen_panel: ScreenPanel,
+        settings_manager: SettingsManager,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._device_manager = device_manager
         self._device_panel = device_panel
         self._screen_panel = screen_panel
+        self._settings_manager = settings_manager
         self._session: CastingSession | None = None
-        self._slider_value = 50
         self._control_enabled = False
-        self._audio_enabled = False
-        self._audio_volume = 100
-        self._audio_muted = False
         self._current_fps = 30
+
+        settings = settings_manager.settings
+        self._slider_value = settings.streaming.performance_slider_value
+        self._audio_enabled = settings.audio.enabled
+        self._audio_volume = settings.audio.volume
+        self._audio_muted = settings.audio.muted
+        device_panel.set_initial_audio_state(self._audio_enabled, self._audio_volume, self._audio_muted)
 
         self._mouse_handler = MouseInputHandler(screen_panel.render_widget, parent=self)
         self._keyboard_handler = KeyboardInputHandler(screen_panel.render_widget, parent=self)
@@ -58,11 +66,20 @@ class CastingController(QObject):
         device_panel.control_toggled.connect(self._on_control_toggled)
         device_panel.audio_toggled.connect(self._on_audio_toggled)
         device_panel.audio_volume_changed.connect(self._on_audio_volume_changed)
+        device_panel.audio_volume_committed.connect(self._save_audio_volume)
         device_panel.audio_mute_toggled.connect(self._on_audio_mute_toggled)
         device_manager.active_device_changed.connect(self._on_active_device_changed)
 
     def set_slider_value(self, value: int) -> None:
         self._slider_value = value
+
+    def save_slider_value(self) -> None:
+        self._settings_manager.settings.streaming.performance_slider_value = self._slider_value
+        self._settings_manager.save()
+
+    def _save_audio_volume(self, value: int) -> None:
+        self._settings_manager.settings.audio.volume = value
+        self._settings_manager.save()
 
     def shutdown(self) -> None:
         self._stop_casting()
@@ -80,6 +97,8 @@ class CastingController(QObject):
     def _on_audio_toggled(self, enabled: bool) -> None:
         self._audio_enabled = enabled
         self._restart_if_casting()
+        self._settings_manager.settings.audio.enabled = enabled
+        self._settings_manager.save()
 
     def _on_audio_volume_changed(self, value: int) -> None:
         self._audio_volume = value
@@ -90,6 +109,8 @@ class CastingController(QObject):
         self._audio_muted = muted
         if self._session is not None:
             self._session.set_audio_muted(muted)
+        self._settings_manager.settings.audio.muted = muted
+        self._settings_manager.save()
 
     def _restart_if_casting(self) -> None:
         if self._session is not None:
@@ -129,6 +150,8 @@ class CastingController(QObject):
         session.frame_available.connect(self._on_frame_available)
         session.connection_failed.connect(self._on_connection_failed)
         session.audio_unavailable.connect(self._on_audio_unavailable)
+        session.audio_pcm_available.connect(self.audio_pcm_ready)
+        session.stats_updated.connect(self.stats_updated)
 
         if self._control_enabled:
             self._mouse_handler.control_message.connect(session.send_control_message)
@@ -167,7 +190,7 @@ class CastingController(QObject):
     def _on_session_started(self, width: int, height: int) -> None:
         logger.info("Casting session started: %dx%d", width, height)
         self._screen_panel.show_video()
-        self.cast_session_started.emit(width, height, self._current_fps)
+        self.cast_session_started.emit(width, height, self._current_fps, self._audio_enabled)
 
     def _on_frame_available(self) -> None:
         if self._session is None:

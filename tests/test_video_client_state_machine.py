@@ -193,6 +193,45 @@ def test_recovers_from_a_corrupt_packet_without_desyncing(client):
         assert frame.shape == (64, 64, 3)
 
 
+def test_emit_stats_reports_measured_values(client):
+    stream = _build_synthetic_stream("Test Device", 1080, 2400)
+    # _bytes_received is normally incremented in _on_video_ready_read() as
+    # real socket bytes arrive; feeding _recv_buffer directly (this test
+    # suite's usual bypass-the-socket approach) skips that, so account for
+    # it explicitly to exercise the bitrate calculation too.
+    client._bytes_received += len(stream)
+    client._recv_buffer.extend(stream)
+    client._process_buffer()  # decodes 10 frames, none taken out of the frame box
+
+    samples = []
+    client.stats_updated.connect(samples.append)
+    client._emit_stats()
+
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample.stream_fps == 10.0  # 10 frames decoded within one 1000ms window
+    assert sample.dropped_frames == 9  # 10 puts into the frame box, only the last unread
+    assert sample.decode_latency_ms >= 0
+    assert sample.bitrate_bps > 0  # real bytes were received
+    assert sample.resolution == (1080, 2400)
+    assert sample.codec == "h264"
+
+
+def test_emit_stats_resets_counters_after_emitting(client):
+    stream = _build_synthetic_stream("Test Device", 640, 480)
+    client._recv_buffer.extend(stream)
+    client._process_buffer()
+    client._emit_stats()  # drains counters from the first window
+
+    samples = []
+    client.stats_updated.connect(samples.append)
+    client._emit_stats()  # nothing new happened since the previous emit
+
+    assert samples[0].stream_fps == 0.0
+    assert samples[0].bitrate_bps == 0.0
+    assert samples[0].dropped_frames == 0
+
+
 def test_rejects_implausible_session_meta_as_connection_failure(client):
     """A prior version of this parser could, after desyncing, interpret
     random bytes as a SessionMeta with nonsense (even negative-looking,

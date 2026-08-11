@@ -5,6 +5,7 @@ from PySide6.QtCore import QObject
 from androidlink.camera.camera_manager import CameraManager
 from androidlink.camera.camera_session import CameraSession
 from androidlink.device.manager import DeviceManager
+from androidlink.settings.manager import SettingsManager
 from androidlink.streaming.controller import SERVER_JAR_RELATIVE_PATH
 from androidlink.ui.panels.device_panel import DevicePanel
 from androidlink.utils.platform import get_resource_path
@@ -24,24 +25,36 @@ class CameraController(QObject):
         self,
         device_manager: DeviceManager,
         device_panel: DevicePanel,
+        settings_manager: SettingsManager,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._device_manager = device_manager
         self._device_panel = device_panel
+        self._settings_manager = settings_manager
         self._camera_manager = CameraManager(parent=self)
         self._session: CameraSession | None = None
 
-        self._selected_camera_id: str | None = None
-        self._selected_fps = 0  # 0 = automatic
+        settings = settings_manager.settings
+        self._selected_camera_id: str | None = settings.camera.camera_id
+        self._selected_fps = settings.camera.fps  # 0 = automatic
 
         device_manager.active_device_changed.connect(self._on_active_device_changed)
-        self._camera_manager.cameras_listed.connect(self._device_panel.set_camera_list)
+        self._camera_manager.cameras_listed.connect(self._on_cameras_listed)
         self._camera_manager.list_failed.connect(self._device_panel.set_camera_list_failed)
 
         device_panel.camera_toggled.connect(self._on_camera_toggled)
         device_panel.camera_selection_changed.connect(self._on_camera_selection_changed)
         device_panel.camera_fps_changed.connect(self._on_camera_fps_changed)
+
+    def _on_cameras_listed(self, cameras) -> None:
+        default_camera = self._device_panel.set_camera_list(cameras)
+        if self._selected_camera_id is not None:
+            self._device_panel.select_camera_by_id(self._selected_camera_id, self._selected_fps)
+        elif default_camera is not None:
+            # No persisted preference -- track the combo's own default
+            # (index 0) without treating it as a user choice worth saving.
+            self._selected_camera_id = default_camera.camera_id
 
     def shutdown(self) -> None:
         self._stop_camera()
@@ -69,12 +82,16 @@ class CameraController(QObject):
         if self._session is not None:
             self._stop_camera()
             self._start_camera()
+        self._settings_manager.settings.camera.camera_id = camera_id
+        self._settings_manager.save()
 
     def _on_camera_fps_changed(self, fps: int) -> None:
         self._selected_fps = fps
         if self._session is not None:
             self._stop_camera()
             self._start_camera()
+        self._settings_manager.settings.camera.fps = fps
+        self._settings_manager.save()
 
     def _start_camera(self) -> None:
         device = self._device_manager.active_device

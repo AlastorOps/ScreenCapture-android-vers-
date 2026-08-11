@@ -51,6 +51,63 @@ def test_record_and_playback_roundtrip(qtbot, tmp_path):
         container.close()
 
 
+def _pcm_chunk(num_samples: int = 960) -> bytes:
+    """~20ms of 48kHz stereo s16 interleaved audio, matching what
+    audio/decoder.py's AudioDecoder actually produces."""
+    rng = np.random.default_rng(0)
+    return rng.integers(-1000, 1000, size=(num_samples * 2,), dtype=np.int16).tobytes()
+
+
+def test_record_with_audio_produces_valid_video_and_audio_streams(qtbot, tmp_path):
+    recorder = VideoRecorder()
+    path = tmp_path / "out_with_audio.mp4"
+
+    with qtbot.waitSignal(recorder.started, timeout=5000):
+        recorder.start(path, 64, 64, 30, has_audio=True)
+
+    for i in range(5):
+        recorder.submit_frame(np.full((64, 64, 3), i * 10, dtype=np.uint8))
+        recorder.submit_audio(_pcm_chunk())
+
+    with qtbot.waitSignal(recorder.stopped, timeout=5000):
+        recorder.stop()
+
+    assert path.exists()
+    container = av.open(str(path))
+    try:
+        assert len(container.streams.video) == 1
+        assert len(container.streams.audio) == 1
+        video_frames = list(container.decode(container.streams.video[0]))
+        assert len(video_frames) == 5
+        container2 = av.open(str(path))
+        audio_frames = list(container2.decode(container2.streams.audio[0]))
+        assert len(audio_frames) > 0
+        container2.close()
+    finally:
+        container.close()
+
+
+def test_submit_audio_ignored_when_started_without_audio(qtbot, tmp_path):
+    recorder = VideoRecorder()
+    path = tmp_path / "video_only.mp4"
+
+    with qtbot.waitSignal(recorder.started, timeout=5000):
+        recorder.start(path, 64, 64, 30, has_audio=False)
+
+    recorder.submit_frame(np.zeros((64, 64, 3), dtype=np.uint8))
+    recorder.submit_audio(_pcm_chunk())  # must not crash the encode thread
+
+    with qtbot.waitSignal(recorder.stopped, timeout=5000):
+        recorder.stop()
+
+    container = av.open(str(path))
+    try:
+        assert len(container.streams.video) == 1
+        assert len(container.streams.audio) == 0
+    finally:
+        container.close()
+
+
 def test_start_with_unwritable_path_emits_error(qtbot, tmp_path):
     """A directory (no file extension for PyAV to infer a container format
     from) is a genuinely invalid recording path -- exercises the real

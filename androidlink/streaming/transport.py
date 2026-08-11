@@ -15,14 +15,16 @@ hardware-unverified until tried against a real device.
 """
 
 import logging
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QMetaObject, QObject, QProcess, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, QProcess, QTimer, Qt, QThread, Signal, Slot
 from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
 
 from androidlink.audio.decoder import AudioDecoder
 from androidlink.audio.playback import AudioPlayback
 from androidlink.streaming.decoder import VideoDecoder
+from androidlink.streaming.diagnostics import DiagnosticsSample
 from androidlink.streaming.performance import StreamingProfile
 from androidlink.streaming.protocol import (
     DEVICE_NAME_FIELD_LENGTH,
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 DEVICE_SERVER_PATH = "/data/local/tmp/scrcpy-server.jar"
 ADB_COMMAND_TIMEOUT_MS = 10_000
 MAX_PLAUSIBLE_FRAME_DIMENSION = 16384  # generous upper bound; catches corrupt/garbage parses
+STATS_INTERVAL_MS = 1000
 
 
 def _is_plausible_frame_size(width: int, height: int) -> bool:
@@ -61,6 +64,8 @@ class ScrcpyVideoClient(QObject):
     frame_available = Signal()  # payload lives in the LatestValueBox
     connection_failed = Signal(str)
     audio_unavailable = Signal(bool)  # is_error
+    audio_pcm_available = Signal(bytes)  # decoded PCM, e.g. for recording (48kHz stereo s16)
+    stats_updated = Signal(object)  # DiagnosticsSample
     stopped = Signal()
 
     def __init__(
@@ -94,6 +99,13 @@ class ScrcpyVideoClient(QObject):
         self._decoder: VideoDecoder | None = None
         self._codec_name: str | None = None
         self._pending_frame_meta: FrameMeta | None = None
+        self._last_resolution: tuple[int, int] | None = None
+
+        self._stats_timer: QTimer | None = None
+        self._decoded_frame_count = 0
+        self._bytes_received = 0
+        self._decode_time_total = 0.0
+        self._decode_count = 0
 
         self._audio_recv_buffer = bytearray()
         self._audio_stage = "audio_header"
@@ -102,6 +114,8 @@ class ScrcpyVideoClient(QObject):
         self._pending_audio_frame_meta: FrameMeta | None = None
         self._audio_volume = 1.0
         self._audio_muted = False
+        self._audio_pcm_logged = False
+        self._audio_empty_decode_count = 0
 
         self._reverse_active = False
         self._stopping = False
@@ -121,10 +135,20 @@ class ScrcpyVideoClient(QObject):
 
         if not self._launch_server_process():
             self.connection_failed.emit("Could not launch scrcpy-server on the device")
+            return
+
+        self._stats_timer = QTimer(self)
+        self._stats_timer.setInterval(STATS_INTERVAL_MS)
+        self._stats_timer.timeout.connect(self._emit_stats)
+        self._stats_timer.start()
 
     @Slot()
     def stop(self) -> None:
         self._stopping = True
+
+        if self._stats_timer is not None:
+            self._stats_timer.stop()
+            self._stats_timer = None
 
         if self._video_socket is not None:
             self._video_socket.close()
@@ -309,8 +333,28 @@ class ScrcpyVideoClient(QObject):
             self._audio_playback.set_muted(muted)
 
     def _on_video_ready_read(self) -> None:
-        self._recv_buffer.extend(bytes(self._video_socket.readAll()))
+        data = bytes(self._video_socket.readAll())
+        self._bytes_received += len(data)
+        self._recv_buffer.extend(data)
         self._process_buffer()
+
+    def _emit_stats(self) -> None:
+        decode_latency_ms = (
+            (self._decode_time_total / self._decode_count) * 1000 if self._decode_count else 0.0
+        )
+        sample = DiagnosticsSample(
+            stream_fps=float(self._decoded_frame_count) * (1000 / STATS_INTERVAL_MS),
+            dropped_frames=self._frame_box.take_dropped_count(),
+            decode_latency_ms=decode_latency_ms,
+            bitrate_bps=float(self._bytes_received) * 8 * (1000 / STATS_INTERVAL_MS),
+            resolution=self._last_resolution,
+            codec=self._codec_name,
+        )
+        self.stats_updated.emit(sample)
+        self._decoded_frame_count = 0
+        self._bytes_received = 0
+        self._decode_time_total = 0.0
+        self._decode_count = 0
 
     def _process_buffer(self) -> None:  # noqa: C901 - simple linear state machine
         while True:
@@ -354,6 +398,7 @@ class ScrcpyVideoClient(QObject):
                     if self._decoder is not None:
                         self._decoder.close()
                     self._decoder = VideoDecoder(self._codec_name)
+                    self._last_resolution = (meta.width, meta.height)
                     self.session_started.emit(meta.width, meta.height)
                 else:
                     self._pending_frame_meta = meta
@@ -382,7 +427,12 @@ class ScrcpyVideoClient(QObject):
                         # itself -- the decoder needs them set explicitly.
                         self._decoder.set_extradata(raw)
                     else:
-                        for frame in self._decoder.decode(raw):
+                        decode_start = time.perf_counter()
+                        frames = self._decoder.decode(raw)
+                        self._decode_time_total += time.perf_counter() - decode_start
+                        self._decode_count += 1
+                        for frame in frames:
+                            self._decoded_frame_count += 1
                             self._frame_box.put(frame)
                             self.frame_available.emit()
                 except Exception:
@@ -418,6 +468,9 @@ class ScrcpyVideoClient(QObject):
                 self._audio_playback.start()
                 self._audio_playback.set_volume(self._audio_volume)
                 self._audio_playback.set_muted(self._audio_muted)
+                self._audio_pcm_logged = False
+                self._audio_empty_decode_count = 0
+                logger.info("Android audio session started (codec=%s)", result)
                 self._audio_stage = "audio_packet_header"
 
             elif self._audio_stage == "audio_packet_header":
@@ -450,7 +503,28 @@ class ScrcpyVideoClient(QObject):
                     else:
                         pcm = self._audio_decoder.decode(raw)
                         if pcm:
+                            self._audio_empty_decode_count = 0
                             self._audio_playback.write(pcm)
+                            self.audio_pcm_available.emit(pcm)
+                            if not self._audio_pcm_logged:
+                                logger.info(
+                                    "First Android audio PCM decoded and written (%d bytes)",
+                                    len(pcm),
+                                )
+                                self._audio_pcm_logged = True
+                        else:
+                            # A decoder that never throws but also never
+                            # yields a frame is a silent failure -- no
+                            # exception, no audio_unavailable signal, just
+                            # permanent silence. Surface it after enough
+                            # consecutive empty decodes that it's clearly
+                            # not just normal codec startup latency.
+                            self._audio_empty_decode_count += 1
+                            if self._audio_empty_decode_count == 50:
+                                logger.warning(
+                                    "Decoded 50 consecutive audio packets with no PCM output -- "
+                                    "audio decode may be failing silently (bad/missing extradata?)"
+                                )
                 except Exception:
                     logger.exception("Audio decode error; dropping this packet")
 
@@ -470,6 +544,8 @@ class CastingSession(QObject):
     frame_available = Signal()
     connection_failed = Signal(str)
     audio_unavailable = Signal(bool)
+    audio_pcm_available = Signal(bytes)
+    stats_updated = Signal(object)  # DiagnosticsSample
     stopped = Signal()
 
     # Connected (GUI thread) -> client slot (worker thread); Qt auto-promotes
@@ -508,6 +584,8 @@ class CastingSession(QObject):
         self._client.frame_available.connect(self.frame_available)
         self._client.connection_failed.connect(self.connection_failed)
         self._client.audio_unavailable.connect(self.audio_unavailable)
+        self._client.audio_pcm_available.connect(self.audio_pcm_available)
+        self._client.stats_updated.connect(self.stats_updated)
         self._client.stopped.connect(self._on_client_stopped)
         self._control_message_requested.connect(self._client.send_control_message)
         self._audio_volume_requested.connect(self._client.set_audio_volume)
