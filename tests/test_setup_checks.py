@@ -1,9 +1,13 @@
 """run_setup_checks() against a real DeviceManager instance (white-box:
 directly setting its private device/adb state, the same way other tests in
 this suite drive transport/session state machines) plus the two
-environment probes, which genuinely run for real on this machine (no
-virtual-cable/virtual-cam backend installed here, confirmed elsewhere in
-this suite).
+environment probes, which genuinely run for real -- as real machine state,
+not mocks, so the virtual-camera/virtual-microphone checks are exercised
+against both possible outcomes explicitly (see
+test_virtual_backend_checks_report_warning_when_not_installed()'s use of
+monkeypatch to force the "not installed" path, since this machine may or
+may not actually have one installed depending on what's been set up to test
+the Camera/Mic features).
 """
 
 import os
@@ -15,6 +19,7 @@ from pathlib import Path
 from androidlink.device.device_model import AndroidDevice, ConnectionState
 from androidlink.device.manager import DeviceManager
 from androidlink.setup.checks import CheckStatus, run_setup_checks
+import androidlink.setup.checks as setup_checks_module
 
 
 def _checks_by_key(device_manager: DeviceManager) -> dict:
@@ -101,13 +106,44 @@ def test_companion_app_check_reflects_actual_architecture(qapp):
     assert checks["companion_app"].status == CheckStatus.OK
 
 
-def test_virtual_backend_checks_reflect_real_machine_state(qapp):
-    """This dev machine has neither a virtual camera backend nor a virtual
-    audio cable installed (verified directly elsewhere in this suite), so
-    these should genuinely report WARNING, not a mocked value."""
+def test_virtual_backend_checks_report_warning_when_not_installed(qapp, monkeypatch):
+    """Forces the real "not installed" path (rather than relying on this
+    machine happening to have neither backend installed, which stopped
+    being guaranteed once one was installed to test the Camera/Mic features
+    for real) by monkeypatching the two detection functions setup/checks.py
+    itself calls -- the check logic that turns their result into a
+    SetupCheck still runs for real, unmocked."""
+    monkeypatch.setattr(setup_checks_module, "detect_backend_available", lambda: False)
+    monkeypatch.setattr(setup_checks_module, "find_virtual_cable_output_device", lambda: None)
+
     device_manager = DeviceManager()
     checks = _checks_by_key(device_manager)
     assert checks["virtual_camera"].status == CheckStatus.WARNING
     assert checks["virtual_microphone"].status == CheckStatus.WARNING
     assert checks["virtual_camera"].guidance is not None
     assert checks["virtual_microphone"].guidance is not None
+
+
+def test_virtual_backend_checks_report_ok_when_installed(qapp, monkeypatch):
+    """The inverse case, forced the same way for a deterministic test
+    regardless of this machine's actual state."""
+    monkeypatch.setattr(setup_checks_module, "detect_backend_available", lambda: True)
+    monkeypatch.setattr(
+        setup_checks_module, "find_virtual_cable_output_device", lambda: object()
+    )
+
+    device_manager = DeviceManager()
+    checks = _checks_by_key(device_manager)
+    assert checks["virtual_camera"].status == CheckStatus.OK
+    assert checks["virtual_microphone"].status == CheckStatus.OK
+
+
+def test_virtual_backend_checks_against_this_machines_real_state(qapp):
+    """Also run once against whatever is genuinely installed on this
+    machine, unmocked -- not asserting a specific outcome (that's exactly
+    what varies), just that the check machinery doesn't crash and always
+    produces a real status either way."""
+    device_manager = DeviceManager()
+    checks = _checks_by_key(device_manager)
+    assert checks["virtual_camera"].status in (CheckStatus.OK, CheckStatus.WARNING)
+    assert checks["virtual_microphone"].status in (CheckStatus.OK, CheckStatus.WARNING)

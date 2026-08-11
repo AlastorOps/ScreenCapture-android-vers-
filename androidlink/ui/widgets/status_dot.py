@@ -17,13 +17,17 @@ class StatusState(Enum):
     ERROR = "error"
 
 
-_STATE_COLORS = {
-    StatusState.UNKNOWN: palette.TEXT_MUTED,
-    StatusState.DISCONNECTED: palette.TEXT_MUTED,
-    StatusState.CONNECTING: palette.WARNING,
-    StatusState.CONNECTED: palette.SUCCESS,
-    StatusState.ERROR: palette.ERROR,
-}
+def _state_color(state: "StatusState") -> str:
+    # Resolved at paint time (not cached at import time) so a theme switch
+    # is reflected immediately -- see palette.py's module docstring.
+    p = palette.current()
+    return {
+        StatusState.UNKNOWN: p.text_muted,
+        StatusState.DISCONNECTED: p.text_muted,
+        StatusState.CONNECTING: p.warning,
+        StatusState.CONNECTED: p.success,
+        StatusState.ERROR: p.error,
+    }[state]
 
 
 class StatusDot(QWidget):
@@ -43,5 +47,5 @@ class StatusDot(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(_STATE_COLORS[self._state]))
+        painter.setBrush(QColor(_state_color(self._state)))
         painter.drawEllipse(QRectF(0, 0, _DIAMETER, _DIAMETER))

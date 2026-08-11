@@ -17,11 +17,22 @@ from PySide6.QtCore import QObject
 
 from androidlink.recording.recorder import VideoRecorder
 from androidlink.recording.screenshots import save_screenshot
+from androidlink.settings.manager import SettingsManager
 from androidlink.streaming.controller import CastingController
 from androidlink.ui.panels.status_panel import StatusPanel
+from androidlink.utils import errors
 from androidlink.utils.platform import get_recordings_dir, get_screenshots_dir
 
 logger = logging.getLogger(__name__)
+
+# prompt.md section 27's Recording > Quality setting, mapped to a target
+# video bitrate. "standard" (the default) leaves the encoder's own default
+# untouched -- the same behavior this app had before the setting existed.
+_QUALITY_BIT_RATES = {
+    "standard": None,
+    "high": 12_000_000,
+    "maximum": 24_000_000,
+}
 
 
 def _timestamp() -> str:
@@ -33,10 +44,12 @@ class RecordingController(QObject):
         self,
         casting_controller: CastingController,
         status_panel: StatusPanel,
+        settings_manager: SettingsManager,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._status_panel = status_panel
+        self._settings_manager = settings_manager
         self._recorder = VideoRecorder(parent=self)
 
         self._frame_width = 0
@@ -95,12 +108,21 @@ class RecordingController(QObject):
 
     def _start_recording(self) -> None:
         if self._frame_width == 0 or self._frame_height == 0:
-            self._status_panel.show_recording_error("No active cast session")
+            self._status_panel.show_recording_error(errors.NO_ACTIVE_CAST_SESSION.text)
             return
 
-        path = get_recordings_dir() / f"AndroidLink_{_timestamp()}.mp4"
+        recording_settings = self._settings_manager.settings.recording
+        path = (
+            get_recordings_dir(recording_settings.save_directory)
+            / f"AndroidLink_{_timestamp()}.mp4"
+        )
         self._recorder.start(
-            path, self._frame_width, self._frame_height, self._fps, has_audio=self._audio_enabled
+            path,
+            self._frame_width,
+            self._frame_height,
+            self._fps,
+            has_audio=self._audio_enabled,
+            video_bit_rate=_QUALITY_BIT_RATES.get(recording_settings.quality),
         )
 
     def _on_recorder_started(self) -> None:
@@ -116,13 +138,14 @@ class RecordingController(QObject):
 
     def _on_screenshot_requested(self) -> None:
         if self._latest_frame is None:
-            self._status_panel.show_recording_error("No frame to capture yet")
+            self._status_panel.show_recording_error(errors.NO_FRAME_TO_CAPTURE.text)
             return
 
-        path = get_screenshots_dir() / f"AndroidLink_{_timestamp()}.png"
+        save_dir = self._settings_manager.settings.recording.save_directory
+        path = get_screenshots_dir(save_dir) / f"AndroidLink_{_timestamp()}.png"
         if save_screenshot(self._latest_frame, path):
             logger.info("Screenshot saved: %s", path)
             self._status_panel.show_screenshot_saved(str(path))
         else:
             logger.warning("Could not save screenshot to %s", path)
-            self._status_panel.show_recording_error("Could not save screenshot")
+            self._status_panel.show_recording_error(errors.screenshot_save_failed(str(path)).text)

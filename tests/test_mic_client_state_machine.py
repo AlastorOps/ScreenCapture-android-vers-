@@ -8,9 +8,12 @@ Unlike the shared Cast+Audio session, MicClient's socket receives the
 scrcpy-server's first socket -- see protocol.build_mic_server_launch_args's
 docstring), so the synthetic stream here includes that field too.
 
-This machine has no virtual-audio-cable driver (VB-Audio/VoiceMeeter)
-installed, so virtual_mic_unavailable firing on session start is the real,
-accurate behavior here -- not a simulated failure.
+virtual_mic_unavailable firing on session start is forced via monkeypatching
+QMediaDevices.audioOutputs() (see
+test_full_handshake_decodes_and_reports_virtual_mic_unavailable()) rather
+than relying on this machine happening to have no VB-Audio/VoiceMeeter
+driver installed, which stopped being guaranteed once one was installed to
+test the Mic feature for real.
 """
 
 import os
@@ -21,6 +24,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import av
 import pytest
+from PySide6.QtMultimedia import QMediaDevices
 
 from androidlink.audio.mic_session import MicClient
 from androidlink.streaming.protocol import PACKET_FLAG_CONFIG, PACKET_FLAG_KEY_FRAME
@@ -67,7 +71,14 @@ def client(qapp) -> MicClient:
     )
 
 
-def test_full_handshake_decodes_and_reports_virtual_mic_unavailable(client):
+def test_full_handshake_decodes_and_reports_virtual_mic_unavailable(client, monkeypatch):
+    real_outputs = QMediaDevices.audioOutputs()
+    non_cable_outputs = [
+        d for d in real_outputs
+        if "cable" not in d.description().lower() and "voicemeeter" not in d.description().lower()
+    ]
+    monkeypatch.setattr(QMediaDevices, "audioOutputs", staticmethod(lambda: non_cable_outputs))
+
     extradata, packets = _real_opus_packets_and_extradata()
     stream = _build_synthetic_mic_stream(b"opus", extradata, packets)
 
@@ -87,6 +98,24 @@ def test_full_handshake_decodes_and_reports_virtual_mic_unavailable(client):
     assert client._decoder is not None
     assert client._stage == "packet_header"  # fully drained, ready for more
     assert len(client._recv_buffer) == 0
+
+
+def test_unrecognized_codec_id_degrades_to_audio_unavailable_instead_of_crashing(client):
+    """Same regression as test_audio_client_state_machine.py's equivalent --
+    MicClient shares the same decode_audio_header() call, previously
+    unguarded against its ValueError for an unrecognized codec id."""
+    stream = bytearray()
+    stream += b"Test Device".ljust(64, b"\x00")
+    stream += b"\x01\x02\x03\x04"
+
+    events = []
+    client.audio_unavailable.connect(events.append)
+
+    client._recv_buffer.extend(stream)
+    client._process_buffer()  # must not raise
+
+    assert events == [True]
+    assert client._stage == "disabled"
 
 
 def test_handles_arbitrary_tcp_chunk_boundaries(client):

@@ -2,6 +2,7 @@ import logging
 
 from PySide6.QtCore import QObject, Signal
 
+from androidlink.device.display_info import FALLBACK_HZ
 from androidlink.device.manager import DeviceManager
 from androidlink.input.keyboard import KeyboardInputHandler
 from androidlink.input.mouse import MouseInputHandler
@@ -70,12 +71,39 @@ class CastingController(QObject):
         device_panel.audio_mute_toggled.connect(self._on_audio_mute_toggled)
         device_manager.active_device_changed.connect(self._on_active_device_changed)
 
+    @property
+    def is_casting(self) -> bool:
+        return self._session is not None
+
     def set_slider_value(self, value: int) -> None:
         self._slider_value = value
 
     def save_slider_value(self) -> None:
         self._settings_manager.settings.streaming.performance_slider_value = self._slider_value
         self._settings_manager.save()
+
+    def restart_if_casting(self) -> None:
+        """Public entry point for settings changes that require a fresh
+        session to take effect -- resolution/FPS/bitrate overrides and
+        audio output device selection can't be changed on an
+        already-running scrcpy-server session any more than Control/Audio
+        can (see this class's docstring), so the Settings dialog calls this
+        after saving one of those instead of leaving the user to manually
+        toggle Cast off and back on. A no-op while casting is off."""
+        self._restart_if_casting()
+
+    def apply_audio_volume(self, value: int) -> None:
+        """Applies a volume change live to whatever cast session is
+        currently active (a no-op otherwise) without touching settings
+        persistence -- callers own persisting the value themselves. Mirrors
+        the Device panel's own volume slider (_on_audio_volume_changed)."""
+        self._on_audio_volume_changed(value)
+
+    def apply_audio_muted(self, muted: bool) -> None:
+        """Applies a mute change live to whatever cast session is currently
+        active (a no-op otherwise), and persists it -- mirrors the Device
+        panel's own mute toggle (_on_audio_mute_toggled)."""
+        self._on_audio_mute_toggled(muted)
 
     def _save_audio_volume(self, value: int) -> None:
         self._settings_manager.settings.audio.volume = value
@@ -113,9 +141,28 @@ class CastingController(QObject):
         self._settings_manager.save()
 
     def _restart_if_casting(self) -> None:
-        if self._session is not None:
-            self._stop_casting()
-            self._start_casting()
+        """Stops the current session and starts a fresh one once the old
+        one has genuinely finished tearing down.
+
+        CastingSession.stop() posts a *queued* call to the worker thread
+        (QMetaObject.invokeMethod(..., QueuedConnection)) so it returns
+        immediately, well before the old scrcpy-server process is killed
+        and its `adb reverse` tunnel is removed on-device. Calling
+        _start_casting() right after used to launch a brand new
+        scrcpy-server session while the old one was still mid-teardown --
+        on real hardware this let the old session keep holding the
+        device's hardware video encoder, so a resolution/FPS/bitrate change
+        could silently fail to take effect (confirmed: the new session
+        would start, but the device kept serving the old encoder
+        configuration) even though a "new" session had technically begun.
+        Waiting for the old session's `stopped` signal (only emitted after
+        its worker thread has fully unwound) closes that race.
+        """
+        if self._session is None:
+            return
+        session_to_stop = self._session
+        session_to_stop.stopped.connect(self._start_casting)
+        self._stop_casting()
 
     def _on_active_device_changed(self, device) -> None:
         if device is None and self._session is not None:
@@ -132,10 +179,27 @@ class CastingController(QObject):
             return
 
         server_jar_path = get_resource_path(SERVER_JAR_RELATIVE_PATH)
-        profile = resolve_streaming_profile(self._slider_value)
+        streaming_settings = self._settings_manager.settings.streaming
+        profile = resolve_streaming_profile(
+            self._slider_value,
+            max_size_override=streaming_settings.resolution_override,
+            max_fps_override=streaming_settings.fps_override,
+            bitrate_override_mbps=streaming_settings.bitrate_override_mbps,
+            automatic_fps=device.refresh_rate_hz or FALLBACK_HZ,
+        )
         self._current_fps = profile.max_fps
 
         self._screen_panel.show_placeholder("Connecting...")
+
+        audio_settings = self._settings_manager.settings.audio
+        audio_output_device_id = (
+            bytes.fromhex(audio_settings.output_device_id) if audio_settings.output_device_id else None
+        )
+        audio_secondary_output_device_id = (
+            bytes.fromhex(audio_settings.secondary_output_device_id)
+            if audio_settings.secondary_output_device_id
+            else None
+        )
 
         session = CastingSession(
             adb_path,
@@ -144,6 +208,8 @@ class CastingController(QObject):
             profile,
             enable_control=self._control_enabled,
             enable_audio=self._audio_enabled,
+            audio_output_device_id=audio_output_device_id,
+            audio_secondary_output_device_id=audio_secondary_output_device_id,
             parent=self,
         )
         session.session_started.connect(self._on_session_started)

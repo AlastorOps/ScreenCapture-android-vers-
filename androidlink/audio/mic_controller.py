@@ -49,6 +49,18 @@ class MicController(QObject):
     def shutdown(self) -> None:
         self._stop_mic()
 
+    def apply_volume(self, value: int) -> None:
+        """Applies a volume change live to whatever mic session is
+        currently active (a no-op otherwise), without touching settings
+        persistence. Mirrors the Device panel's own mic volume slider."""
+        self._on_mic_volume_changed(value)
+
+    def apply_muted(self, muted: bool) -> None:
+        """Applies a mute change live to whatever mic session is currently
+        active (a no-op otherwise), and persists it. Mirrors the Device
+        panel's own mic mute toggle."""
+        self._on_mic_mute_toggled(muted)
+
     def _on_active_device_changed(self, device) -> None:
         if device is None:
             self._stop_mic()
@@ -61,11 +73,22 @@ class MicController(QObject):
 
     def _on_mic_source_changed(self, source: str) -> None:
         self._audio_source = source
-        if self._session is not None:
-            self._stop_mic()
-            self._start_mic()
+        self._restart_mic_if_active()
         self._settings_manager.settings.microphone.audio_source = source
         self._settings_manager.save()
+
+    def _restart_mic_if_active(self) -> None:
+        """Stops the current mic session and starts a fresh one once the
+        old one has genuinely finished tearing down -- see
+        streaming/controller.py's CastingController._restart_if_casting()
+        docstring for why a naive stop()-then-start() can silently keep the
+        old audio source active instead of applying the change (MicSession
+        .stop() also posts a queued call to its worker thread)."""
+        if self._session is None:
+            return
+        session_to_stop = self._session
+        session_to_stop.stopped.connect(self._start_mic)
+        self._stop_mic()
 
     def _on_mic_volume_changed(self, value: int) -> None:
         self._volume = value

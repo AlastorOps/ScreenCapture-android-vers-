@@ -28,7 +28,7 @@ class _FakeRecorder:
         self.start_calls = []
         self.submitted_audio = []
 
-    def start(self, path, width, height, fps, has_audio=False):
+    def start(self, path, width, height, fps, has_audio=False, video_bit_rate=None):
         self.start_calls.append(has_audio)
 
     def submit_audio(self, pcm_bytes):
@@ -57,7 +57,7 @@ def _build(qtbot, tmp_path):
     qtbot.addWidget(status_panel)
 
     casting_controller = CastingController(device_manager, device_panel, screen_panel, settings_manager)
-    recording_controller = RecordingController(casting_controller, status_panel)
+    recording_controller = RecordingController(casting_controller, status_panel, settings_manager)
     recording_controller._recorder = _FakeRecorder()
     return casting_controller, recording_controller, status_panel
 

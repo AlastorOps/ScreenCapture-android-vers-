@@ -3,6 +3,7 @@ from pathlib import Path
 import av
 import pytest
 
+import androidlink.streaming.decoder as decoder_module
 from androidlink.streaming.decoder import UnsupportedCodecError, VideoDecoder
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "sample.h264"
@@ -78,3 +79,38 @@ def test_set_extradata_fixes_separate_config_packet_decode():
 
     assert len(frames) == 1
     assert frames[0].shape == (64, 64, 3)
+
+
+def test_hardware_acceleration_flag_reflects_this_machines_real_capability():
+    """Not mocked -- this machine's PyAV/FFmpeg/GPU combo genuinely
+    determines whether D3D11VA/DXVA2 construction succeeds, and the decoded
+    output must be correct either way (prompt.md: never fabricate a
+    performance/capability claim)."""
+    decoder = VideoDecoder("h264")
+    try:
+        assert isinstance(decoder.hardware_accelerated, bool)
+        total_frames = 0
+        for access_unit in _access_units():
+            frames = decoder.decode(access_unit)
+            total_frames += len(frames)
+            for frame in frames:
+                assert frame.shape == (64, 64, 3)
+    finally:
+        decoder.close()
+    assert total_frames == 10
+
+
+def test_falls_back_to_software_when_no_hwaccel_backend_is_available(monkeypatch):
+    monkeypatch.setattr(decoder_module, "_create_hwaccel_context", lambda _av_name: (None, None))
+
+    decoder = VideoDecoder("h264")
+    try:
+        assert decoder.hardware_accelerated is False
+        frames = decoder.decode(_access_units()[0])
+    finally:
+        decoder.close()
+
+    assert len(frames) == 1
+    assert frames[0].shape == (64, 64, 3)
+
+

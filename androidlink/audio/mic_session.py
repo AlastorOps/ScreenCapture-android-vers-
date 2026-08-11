@@ -22,9 +22,9 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import QMetaObject, QObject, QProcess, Qt, QThread, Signal, Slot
-from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
+from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
 
-from androidlink.audio.decoder import AudioDecoder
+from androidlink.audio.decoder import AudioDecoder, UnsupportedAudioCodecError
 from androidlink.audio.virtual_audio import VirtualMicrophoneSink, VirtualMicrophoneUnavailableError
 from androidlink.streaming.protocol import (
     DEVICE_NAME_FIELD_LENGTH,
@@ -41,6 +41,7 @@ from androidlink.streaming.protocol import (
     generate_scid,
     parse_packet_header,
 )
+from androidlink.utils import errors
 
 logger = logging.getLogger(__name__)
 
@@ -95,18 +96,18 @@ class MicClient(QObject):
         )
         if not ok:
             logger.error("adb push scrcpy-server failed: %s", output)
-            self.connection_failed.emit("Could not push scrcpy-server to the device")
+            self.connection_failed.emit(errors.SERVER_PUSH_FAILED.text)
             return
 
         local_port = self._open_listener_and_reverse_tunnel()
         if local_port is None:
-            self.connection_failed.emit("Could not set up the ADB reverse tunnel")
+            self.connection_failed.emit(errors.REVERSE_TUNNEL_FAILED.text)
             return
 
         self._tcp_server.newConnection.connect(self._on_new_connection)
 
         if not self._launch_server_process():
-            self.connection_failed.emit("Could not launch scrcpy-server on the device")
+            self.connection_failed.emit(errors.SERVER_LAUNCH_FAILED.text)
 
     @Slot()
     def stop(self) -> None:
@@ -236,13 +237,15 @@ class MicClient(QObject):
         if self._tcp_server is None or self._audio_socket is not None:
             return
         self._audio_socket = self._tcp_server.nextPendingConnection()
+        # See streaming/transport.py's _disable_nagle() for why.
+        self._audio_socket.setSocketOption(QAbstractSocket.SocketOption.LowDelayOption, 1)
         self._audio_socket.readyRead.connect(self._on_audio_ready_read)
         self._audio_socket.disconnected.connect(self._on_audio_disconnected)
 
     def _on_audio_disconnected(self) -> None:
         if not self._stopping:
             logger.warning("scrcpy-server mic socket disconnected unexpectedly")
-            self.connection_failed.emit("The connection to the device was lost")
+            self.connection_failed.emit(errors.DEVICE_DISCONNECTED.text)
 
     def _on_audio_ready_read(self) -> None:
         self._recv_buffer.extend(bytes(self._audio_socket.readAll()))
@@ -263,7 +266,13 @@ class MicClient(QObject):
                     return
                 raw = bytes(self._recv_buffer[:4])
                 del self._recv_buffer[:4]
-                result = decode_audio_header(raw)
+                try:
+                    result = decode_audio_header(raw)
+                except ValueError:
+                    logger.error("Unrecognized microphone codec header")
+                    self.audio_unavailable.emit(True)
+                    self._stage = "disabled"
+                    return
 
                 if isinstance(result, AudioStreamUnavailable):
                     logger.warning(
@@ -273,7 +282,14 @@ class MicClient(QObject):
                     self._stage = "disabled"
                     return
 
-                self._decoder = AudioDecoder(result)
+                try:
+                    self._decoder = AudioDecoder(result)
+                except UnsupportedAudioCodecError:
+                    logger.error("Unsupported microphone audio codec: %s", result)
+                    self.audio_unavailable.emit(True)
+                    self._stage = "disabled"
+                    return
+
                 self._start_virtual_mic()
                 self._stage = "packet_header"
 
@@ -320,7 +336,7 @@ class MicClient(QObject):
             self._sink = VirtualMicrophoneSink()
         except VirtualMicrophoneUnavailableError as exc:
             logger.warning("Virtual microphone unavailable: %s", exc)
-            self.virtual_mic_unavailable.emit(str(exc))
+            self.virtual_mic_unavailable.emit(errors.virtual_microphone_unavailable(str(exc)).text)
             return
 
         self._sink.start()

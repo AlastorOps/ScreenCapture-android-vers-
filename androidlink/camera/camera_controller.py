@@ -79,19 +79,31 @@ class CameraController(QObject):
 
     def _on_camera_selection_changed(self, camera_id: str) -> None:
         self._selected_camera_id = camera_id
-        if self._session is not None:
-            self._stop_camera()
-            self._start_camera()
+        self._restart_camera_if_active()
         self._settings_manager.settings.camera.camera_id = camera_id
         self._settings_manager.save()
 
     def _on_camera_fps_changed(self, fps: int) -> None:
         self._selected_fps = fps
-        if self._session is not None:
-            self._stop_camera()
-            self._start_camera()
+        self._restart_camera_if_active()
         self._settings_manager.settings.camera.fps = fps
         self._settings_manager.save()
+
+    def _restart_camera_if_active(self) -> None:
+        """Stops the current camera session and starts a fresh one once the
+        old one has genuinely finished tearing down -- see
+        streaming/controller.py's CastingController._restart_if_casting()
+        docstring for why this can't just be stop() immediately followed by
+        start(): CameraSession.stop() posts a queued call to its worker
+        thread, so the old scrcpy-server process (and the device's hardware
+        video encoder it's holding) may still be alive when a naive
+        stop()-then-start() launches the new one, silently keeping the old
+        camera/resolution/FPS active instead of applying the change."""
+        if self._session is None:
+            return
+        session_to_stop = self._session
+        session_to_stop.stopped.connect(self._start_camera)
+        self._stop_camera()
 
     def _start_camera(self) -> None:
         device = self._device_manager.active_device

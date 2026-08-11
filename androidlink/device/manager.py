@@ -4,7 +4,13 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QProcess, QTimer, Signal
 
 from androidlink.device.adb import find_adb_executable, parse_devices_output, parse_getprop_output
-from androidlink.device.device_model import AndroidDevice, ConnectionState, parse_connection_state
+from androidlink.device.device_model import (
+    AndroidDevice,
+    ConnectionState,
+    mask_serial,
+    parse_connection_state,
+)
+from androidlink.device.display_info import parse_dumpsys_display
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,17 @@ class DeviceManager(QObject):
         self._devices: dict[str, AndroidDevice] = {}
         self._active_serial: str | None = None
         self._devices_refresh_in_flight = False
+        self._info_fetch_in_flight: set[str] = set()
+        self._display_fetch_in_flight: set[str] = set()
+        # Unlike _info_fetch_in_flight (retried every poll until getprop
+        # eventually reports a model), a display-info parse failure means
+        # this OEM's dumpsys display output doesn't match the format
+        # detection was written against -- that won't change poll to poll,
+        # so retrying it every 1.5s forever would reproduce the exact adb-
+        # server-instability bug fixed in _fetch_device_info's guard above.
+        # Attempted once per connected session; not retried until the
+        # device is unplugged and reconnects as a fresh entry.
+        self._display_fetch_attempted: set[str] = set()
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(POLL_INTERVAL_MS)
@@ -123,8 +140,23 @@ class DeviceManager(QObject):
 
     def _on_devices_result(self, process: QProcess) -> None:
         self._devices_refresh_in_flight = False
-        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        process.deleteLater()
+        try:
+            output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        except RuntimeError:
+            # Rare PySide6/Qt race on Windows: `adb devices -l` can report
+            # both errorOccurred(Crashed) and finished() for the same
+            # invocation when adb has to bootstrap its background daemon
+            # first ("* daemon not running; starting now..."), and by the
+            # time this callback runs the QProcess's C++ object is already
+            # gone. Skip this poll cleanly rather than let the exception
+            # escape the Qt slot -- the next timer tick tries again.
+            logger.warning("adb devices -l: process was torn down before its output could be read")
+            return
+        finally:
+            try:
+                process.deleteLater()
+            except RuntimeError:
+                pass
 
         raw_entries = parse_devices_output(output)
         seen_serials = {entry.serial for entry in raw_entries}
@@ -142,8 +174,20 @@ class DeviceManager(QObject):
                 device.connection_state = state
                 changed = True
 
-            if state == ConnectionState.DEVICE and device.model is None:
+            if (
+                state == ConnectionState.DEVICE
+                and device.model is None
+                and entry.serial not in self._info_fetch_in_flight
+            ):
                 self._fetch_device_info(entry.serial)
+
+            if (
+                state == ConnectionState.DEVICE
+                and device.refresh_rate_hz is None
+                and entry.serial not in self._display_fetch_in_flight
+                and entry.serial not in self._display_fetch_attempted
+            ):
+                self._fetch_display_info(entry.serial)
 
         for serial in set(self._devices) - seen_serials:
             if serial == self._active_serial:
@@ -158,14 +202,35 @@ class DeviceManager(QObject):
     def _fetch_device_info(self, serial: str) -> None:
         if self._adb_path is None:
             return
+        # Without this guard, a getprop call that never successfully sets
+        # device.model (parse failure, the same Qt/shiboken race handled
+        # below, ...) gets re-spawned on every single 1.5s poll forever --
+        # observed in practice to eventually destabilize the local adb
+        # server under enough concurrent/rapid adb invocations, which in
+        # turn drops any active `adb reverse` tunnels scrcpy-server sessions
+        # depend on (surfacing as sudden, unexplained video/audio/camera
+        # socket disconnects mid-session).
+        if serial in self._info_fetch_in_flight:
+            return
+        self._info_fetch_in_flight.add(serial)
+
         process = QProcess(self)
         process.finished.connect(lambda *_: self._on_device_info_result(serial, process))
         process.errorOccurred.connect(lambda err: self._on_process_error("getprop", err))
         process.start(str(self._adb_path), ["-s", serial, "shell", "getprop"])
 
     def _on_device_info_result(self, serial: str, process: QProcess) -> None:
-        output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        process.deleteLater()
+        self._info_fetch_in_flight.discard(serial)
+        try:
+            output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        except RuntimeError:
+            logger.warning("adb getprop (%s): process was torn down before its output could be read", serial)
+            return
+        finally:
+            try:
+                process.deleteLater()
+            except RuntimeError:
+                pass
 
         device = self._devices.get(serial)
         if device is None:
@@ -191,6 +256,56 @@ class DeviceManager(QObject):
 
         if updated:
             self.devices_changed.emit(self.devices)
+
+    def _fetch_display_info(self, serial: str) -> None:
+        if self._adb_path is None or serial in self._display_fetch_in_flight:
+            return
+        self._display_fetch_in_flight.add(serial)
+
+        process = QProcess(self)
+        process.finished.connect(lambda *_: self._on_display_info_result(serial, process))
+        process.errorOccurred.connect(lambda err: self._on_process_error("dumpsys display", err))
+        process.start(str(self._adb_path), ["-s", serial, "shell", "dumpsys", "display"])
+
+    def _on_display_info_result(self, serial: str, process: QProcess) -> None:
+        self._display_fetch_in_flight.discard(serial)
+        self._display_fetch_attempted.add(serial)
+        try:
+            output = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        except RuntimeError:
+            logger.warning(
+                "adb dumpsys display (%s): process was torn down before its output could be read",
+                serial,
+            )
+            return
+        finally:
+            try:
+                process.deleteLater()
+            except RuntimeError:
+                pass
+
+        device = self._devices.get(serial)
+        if device is None:
+            return
+
+        info = parse_dumpsys_display(output)
+        if info is None:
+            logger.info(
+                "Could not detect display refresh rate for %s (unrecognized dumpsys display "
+                "format on this device/Android version) -- FPS options will fall back to 60",
+                mask_serial(serial),
+            )
+            return
+
+        device.refresh_rate_hz = info.active_hz
+        device.supported_refresh_rates_hz = info.supported_hz
+        logger.info(
+            "Detected display for %s: active %dHz, supports %s",
+            mask_serial(serial),
+            info.active_hz,
+            info.supported_hz,
+        )
+        self.devices_changed.emit(self.devices)
 
     @staticmethod
     def _on_process_error(command: str, error: QProcess.ProcessError) -> None:

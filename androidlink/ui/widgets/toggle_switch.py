@@ -17,7 +17,6 @@ class ToggleSwitch(QWidget):
     def __init__(self, checked: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._checked = checked
-        self._accent = QColor(palette.DEFAULT_ACCENT)
         self.setFixedSize(_WIDTH, _HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -31,10 +30,6 @@ class ToggleSwitch(QWidget):
         self.update()
         self.toggled.emit(self._checked)
 
-    def setAccentColor(self, color: QColor) -> None:
-        self._accent = color
-        self.update()
-
     def mousePressEvent(self, event) -> None:  # noqa: ANN001
         if self.isEnabled() and event.button() == Qt.MouseButton.LeftButton:
             self.setChecked(not self._checked)
@@ -44,13 +39,21 @@ class ToggleSwitch(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        p = palette.current()
         track_rect = QRectF(0, 0, _WIDTH, _HEIGHT)
         if not self.isEnabled():
-            track_color = QColor(palette.BG_ELEVATED)
+            track_color = QColor(p.bg_elevated)
         elif self._checked:
-            track_color = self._accent
+            # Read live rather than cached -- previously this widget
+            # captured palette.DEFAULT_ACCENT once at construction and never
+            # updated it, so every toggle switch in the app stayed the
+            # default blue regardless of the user's chosen accent color
+            # (the matching QSS rule for it was dead: a hand-painted QWidget
+            # doesn't apply stylesheet background-color from a property
+            # selector without QStyle involvement).
+            track_color = QColor(palette.current_accent())
         else:
-            track_color = QColor(palette.BORDER)
+            track_color = QColor(p.border)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(track_color)
@@ -58,6 +61,6 @@ class ToggleSwitch(QWidget):
 
         knob_diameter = _HEIGHT - 2 * _MARGIN
         knob_x = _WIDTH - _MARGIN - knob_diameter if self._checked else _MARGIN
-        knob_color = QColor(palette.TEXT_MUTED) if not self.isEnabled() else QColor(palette.BG_WINDOW)
+        knob_color = QColor(p.text_muted) if not self.isEnabled() else QColor(p.bg_window)
         painter.setBrush(knob_color)
         painter.drawEllipse(QRectF(knob_x, _MARGIN, knob_diameter, knob_diameter))

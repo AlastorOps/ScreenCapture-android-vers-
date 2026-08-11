@@ -9,6 +9,31 @@ BACKUP_COUNT = 5
 
 _FORMAT = "%(asctime)s %(levelname)-8s %(name)s:%(lineno)d %(message)s"
 
+_LEVEL_NAME_TO_INT = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+}
+
+
+def resolve_log_level(logging_level: str, debug_mode: bool) -> int:
+    """Maps settings.general's logging_level/debug_mode (prompt.md section
+    27's Diagnostics > Logging/Debug mode) to a stdlib logging level.
+    debug_mode wins outright -- it's meant as a one-click "give me
+    everything" override of whatever level is otherwise selected."""
+    if debug_mode:
+        return logging.DEBUG
+    return _LEVEL_NAME_TO_INT.get(logging_level, logging.INFO)
+
+
+def set_log_level(level: int) -> None:
+    """Applies a new level to the already-configured root logger (e.g. when
+    the user changes Diagnostics settings while the app is running) without
+    tearing down and recreating the file/console handlers setup_logging()
+    installed at startup."""
+    logging.getLogger().setLevel(level)
+
 
 def setup_logging(level: int = logging.INFO) -> None:
     root = logging.getLogger()

@@ -3,9 +3,12 @@ fixture, using the same real-MediaCodec-shaped separate config packet as
 test_video_client_state_machine.py) directly into CameraClient's parsing
 state machine, bypassing sockets/ADB/hardware.
 
-This machine has no virtual camera backend (OBS/Unity Capture) installed,
-so virtual_camera_unavailable firing on session start is the real, accurate
-behavior here -- not a simulated failure.
+virtual_camera_unavailable firing on session start is forced via
+monkeypatching pyvirtualcam.Camera (see
+test_reports_virtual_cam_unavailable_when_no_backend_is_installed()) rather
+than relying on this machine happening to have no OBS/Unity Capture
+installed, which stopped being guaranteed once one was installed to test
+the Camera feature for real.
 """
 
 import os
@@ -15,6 +18,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import av
+import pyvirtualcam
 import pytest
 
 from androidlink.camera.camera_session import CameraClient
@@ -40,6 +44,10 @@ def _split_config_and_slice(access_unit: bytes) -> tuple[bytes, bytes]:
     return access_unit[:36], access_unit[36:]
 
 
+def _raise_no_backend(*_args, **_kwargs):
+    raise RuntimeError("Could not run virtual camera: try installing OBS Studio or Unity Capture")
+
+
 @pytest.fixture
 def client(qapp) -> CameraClient:
     return CameraClient(
@@ -53,10 +61,12 @@ def client(qapp) -> CameraClient:
     )
 
 
-def test_separate_config_packet_decodes_and_reports_virtual_cam_unavailable(client):
-    """This machine has no OBS/Unity Capture installed, so session start
-    should genuinely fail to open a virtual camera -- verifying that real
-    failure path is surfaced correctly rather than crashing or hanging."""
+def test_separate_config_packet_decodes_and_reports_virtual_cam_unavailable(client, monkeypatch):
+    """Forces pyvirtualcam's real "no backend" failure so session start
+    genuinely fails to open a virtual camera -- verifying that real failure
+    path is surfaced correctly rather than crashing or hanging, regardless
+    of whether this machine happens to have a backend installed."""
+    monkeypatch.setattr(pyvirtualcam, "Camera", _raise_no_backend)
     config_bytes, slice_bytes = _split_config_and_slice(_access_units()[0])
 
     stream = bytearray()
@@ -89,6 +99,28 @@ def test_separate_config_packet_decodes_and_reports_virtual_cam_unavailable(clie
     frame = client._frame_box.take()
     assert frame is not None
     assert frame.shape == (64, 64, 3)
+
+
+def test_unsupported_codec_reports_connection_failure_instead_of_crashing(client):
+    """Same regression as test_video_client_state_machine.py's equivalent --
+    CameraClient shares the same VideoDecoder(codec_name) construction, and
+    previously had the same unguarded UnsupportedCodecError gap."""
+    stream = bytearray()
+    stream += b"Test Device".ljust(64, b"\x00")
+    stream += struct.pack(">I", 0x00_76_70_38)  # "vp8" codec id
+    stream += struct.pack(">III", PACKET_FLAG_SESSION >> 32, 64, 64)
+
+    failures = []
+    client.connection_failed.connect(failures.append)
+    started_events = []
+    client.session_started.connect(lambda w, h: started_events.append((w, h)))
+
+    client._recv_buffer.extend(stream)
+    client._process_buffer()  # must not raise
+
+    assert started_events == []
+    assert len(failures) == 1
+    assert "codec" in failures[0].lower()
 
 
 def test_rejects_implausible_session_meta(client):

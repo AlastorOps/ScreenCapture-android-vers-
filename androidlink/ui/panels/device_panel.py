@@ -22,6 +22,7 @@ from androidlink.streaming.protocol import (
 from androidlink.ui.panels.base_panel import BasePanel
 from androidlink.ui.widgets.status_dot import StatusDot, StatusState
 from androidlink.ui.widgets.toggle_switch import ToggleSwitch
+from androidlink.utils import errors
 
 _FEATURES = ["Cast", "Control", "Audio", "Camera", "Mic"]
 _CAST_DEPENDENT_FEATURES = ("Control", "Audio")
@@ -361,12 +362,12 @@ class DevicePanel(BasePanel):
                 )
                 layout.addWidget(connect_button)
         elif device.connection_state == ConnectionState.UNAUTHORIZED:
-            msg = QLabel('Unlock your phone and accept "Allow USB debugging?"')
+            msg = QLabel(errors.DEVICE_UNAUTHORIZED.guidance)
             msg.setProperty("role", "muted")
             msg.setWordWrap(True)
             layout.addWidget(msg)
         elif device.connection_state == ConnectionState.OFFLINE:
-            msg = QLabel("Device offline — try reconnecting the USB cable")
+            msg = QLabel(errors.DEVICE_OFFLINE.guidance)
             msg.setProperty("role", "muted")
             msg.setWordWrap(True)
             layout.addWidget(msg)
@@ -385,14 +386,19 @@ class DevicePanel(BasePanel):
             self._adb_status_label.hide()
             self._device_list_container.show()
         else:
-            self._adb_status_label.setText(
-                "ADB not found. Install Android Platform Tools and ensure "
-                "adb is on your PATH, then reopen AndroidLink."
-            )
+            self._adb_status_label.setText(errors.ADB_UNAVAILABLE.text)
             self._adb_status_label.show()
             self._device_list_container.hide()
 
     def _on_devices_changed(self, devices: list[AndroidDevice]) -> None:
+        # Refresh-rate detection (device/display_info.py) completes
+        # asynchronously after connect and re-emits devices_changed once it
+        # does -- refresh the active device's info panel so "detecting…"
+        # doesn't linger after the real value is already known.
+        active = next((d for d in devices if d.is_active), None)
+        if active is not None:
+            self._on_active_device_changed(active)
+
         self._clear_device_list()
 
         if not devices:
@@ -421,10 +427,21 @@ class DevicePanel(BasePanel):
             self._reset_mic_controls()
             return
 
+        if device.refresh_rate_hz is not None:
+            display_line = f"Display: {device.refresh_rate_hz} Hz"
+            if device.supported_refresh_rates_hz and len(device.supported_refresh_rates_hz) > 1:
+                rates = ", ".join(str(hz) for hz in device.supported_refresh_rates_hz)
+                display_line += f" (supports {rates})"
+        else:
+            # dumpsys display detection hasn't completed yet (or failed on
+            # this device/OEM) -- say so rather than showing a guessed rate.
+            display_line = "Display: detecting…"
+
         self._active_info_label.setText(
             f"{device.display_name}\n"
             f"{device.manufacturer or ''}\n"
             f"Android {device.android_version or '?'} (API {device.api_level or '?'})\n"
+            f"{display_line}\n"
             f"{device.display_serial}"
         )
         self._active_info_label.show()
@@ -591,15 +608,13 @@ class DevicePanel(BasePanel):
     def show_virtual_camera_unavailable(self, message: str) -> None:
         """Reflects a missing OBS Virtual Camera/Unity Capture backend
         (prompt.md section 25: never silently install drivers) by forcing
-        Camera off with an explanation."""
+        Camera off with an explanation. `message` is already a complete,
+        actionable string from utils/errors.py's virtual_camera_unavailable()."""
         camera_toggle = self._feature_toggles["Camera"]
         camera_toggle.blockSignals(True)
         camera_toggle.setChecked(False)
         camera_toggle.blockSignals(False)
-        self._camera_status_label.setText(
-            "No Windows virtual camera backend found. Install OBS Studio or "
-            "Unity Capture, then try again.\n\n" + message
-        )
+        self._camera_status_label.setText(message)
         self._camera_status_label.show()
 
     def _on_mic_toggle_changed(self, checked: bool) -> None:
@@ -658,7 +673,9 @@ class DevicePanel(BasePanel):
 
     def show_virtual_mic_unavailable(self, message: str) -> None:
         """Reflects a missing virtual-audio-cable driver (prompt.md section
-        25: never silently install drivers) by forcing Mic off."""
+        25: never silently install drivers) by forcing Mic off. `message` is
+        already a complete, actionable string from utils/errors.py's
+        virtual_microphone_unavailable()."""
         mic_toggle = self._feature_toggles["Mic"]
         mic_toggle.blockSignals(True)
         mic_toggle.setChecked(False)
@@ -666,10 +683,7 @@ class DevicePanel(BasePanel):
         self._mic_source_combo.setEnabled(False)
         self._mic_volume_slider.setEnabled(False)
         self._mic_mute_toggle.setEnabled(False)
-        self._mic_status_label.setText(
-            "No virtual audio cable driver found. Install VB-Audio Virtual "
-            "Cable (or VoiceMeeter), then try again.\n\n" + message
-        )
+        self._mic_status_label.setText(message)
         self._mic_status_label.show()
 
     def show_audio_unavailable(self, is_error: bool) -> None:

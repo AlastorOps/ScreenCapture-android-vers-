@@ -1,7 +1,7 @@
 QPushButton[role="primary"] {
     background-color: {accent};
     border: 1px solid {accent};
-    color: #0e0f12;
+    color: {accent_contrast_text};
     font-weight: 600;
 }
 
@@ -10,9 +10,9 @@ QPushButton[role="primary"]:hover:!disabled {
 }
 
 QPushButton[role="primary"]:disabled {
-    background-color: #1b1e23;
-    border: 1px solid #262a31;
-    color: #5c6470;
+    background-color: {bg_elevated};
+    border: 1px solid {border};
+    color: {text_muted};
 }
 
 QLineEdit:focus, QComboBox:focus {
@@ -23,12 +23,8 @@ QLabel[role="status-active"] {
     color: {accent};
 }
 
-ToggleSwitch[checked="true"] {
-    background-color: {accent};
-}
-
 QSlider::groove:horizontal {
-    background: #262a31;
+    background: {border};
     height: 4px;
     border-radius: 2px;
 }

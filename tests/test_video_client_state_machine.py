@@ -232,6 +232,31 @@ def test_emit_stats_resets_counters_after_emitting(client):
     assert samples[0].dropped_frames == 0
 
 
+def test_unsupported_codec_reports_connection_failure_instead_of_crashing(client):
+    """Regression test: VideoDecoder(codec_name) raises UnsupportedCodecError
+    for a codec id the protocol layer recognizes (e.g. VP8/VP9) but the
+    decoder wrapper doesn't map to an av codec name. Previously this wasn't
+    caught at all, so it would escape _process_buffer() as an unhandled
+    exception inside a Qt slot instead of being surfaced as a connection
+    failure (prompt.md section 21: unsupported codec)."""
+    stream = bytearray()
+    stream += b"Test Device".ljust(64, b"\x00")
+    stream += struct.pack(">I", 0x00_76_70_38)  # "vp8" codec id (protocol.py's _CODEC_ID_TO_NAME)
+    stream += struct.pack(">III", PACKET_FLAG_SESSION >> 32, 1080, 2400)
+
+    sessions = []
+    client.session_started.connect(lambda w, h: sessions.append((w, h)))
+    failures = []
+    client.connection_failed.connect(failures.append)
+
+    client._recv_buffer.extend(stream)
+    client._process_buffer()  # must not raise
+
+    assert sessions == []
+    assert len(failures) == 1
+    assert "codec" in failures[0].lower()
+
+
 def test_rejects_implausible_session_meta_as_connection_failure(client):
     """A prior version of this parser could, after desyncing, interpret
     random bytes as a SessionMeta with nonsense (even negative-looking,

@@ -1,0 +1,192 @@
+* {
+    font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
+    color: {text_primary};
+}
+
+QMainWindow, QDialog {
+    background-color: {bg_window};
+}
+
+QTabWidget::pane {
+    background-color: {bg_window};
+    border: 1px solid {border};
+    border-radius: 3px;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: {bg_panel};
+    border: 1px solid {border};
+    border-bottom: none;
+    padding: 6px 12px;
+    color: {text_secondary};
+}
+
+QTabBar::tab:selected {
+    background-color: {bg_window};
+    color: {text_primary};
+}
+
+/* On Windows, a plain QWidget used as a QTabWidget page is painted by the
+   native style using the system window color instead of inheriting the
+   QDialog's own {bg_window} from the rule above -- explicit rule needed or
+   every Settings dialog tab shows a white/light panel regardless of theme. */
+QTabWidget QWidget {
+    background-color: {bg_window};
+}
+
+QWidget#BasePanel {
+    background-color: {bg_panel};
+    border: 1px solid {border};
+    border-radius: 3px;
+}
+
+QLabel {
+    background: transparent;
+}
+
+QLabel[role="panel-title"] {
+    color: {text_secondary};
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 4px 6px;
+    border-bottom: 1px solid {border};
+}
+
+QLabel[role="mono"] {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    color: {text_primary};
+}
+
+QLabel[role="muted"] {
+    color: {text_muted};
+}
+
+QLabel[role="placeholder"] {
+    color: {text_muted};
+    font-style: italic;
+}
+
+QPushButton {
+    background-color: {bg_elevated};
+    border: 1px solid {border};
+    border-radius: 3px;
+    padding: 6px 12px;
+    color: {text_primary};
+}
+
+QPushButton:hover:!disabled {
+    background-color: {border};
+}
+
+QPushButton:disabled {
+    color: {text_muted};
+    background-color: {bg_panel};
+}
+
+QSplitter::handle {
+    background-color: {border};
+}
+
+QSplitter::handle:horizontal {
+    width: 1px;
+}
+
+QSplitter::handle:vertical {
+    height: 1px;
+}
+
+QMainWindow::separator {
+    background-color: {bg_window};
+    width: 4px;
+    height: 4px;
+}
+
+QMainWindow::separator:hover {
+    background-color: {border};
+}
+
+QDockWidget {
+    color: {text_secondary};
+    titlebar-close-icon: none;
+    titlebar-normal-icon: none;
+}
+
+QDockWidget::title {
+    background-color: {bg_panel};
+    border: 1px solid {border};
+    border-radius: 3px;
+    padding: 5px 6px;
+    font-weight: 600;
+}
+
+QToolBar#performance_toolbar {
+    background-color: {bg_window};
+    border-top: 1px solid {border};
+    spacing: 0;
+    padding: 0;
+}
+
+QToolBar#performance_toolbar::separator {
+    width: 0;
+}
+
+QStatusBar {
+    background-color: {bg_panel};
+    border-top: 1px solid {border};
+    color: {text_secondary};
+}
+
+QMenuBar {
+    background-color: {bg_window};
+    border-bottom: 1px solid {border};
+}
+
+QMenuBar::item:selected {
+    background-color: {bg_elevated};
+}
+
+QMenu {
+    background-color: {bg_panel};
+    border: 1px solid {border};
+}
+
+QMenu::item:selected {
+    background-color: {bg_elevated};
+}
+
+QScrollBar:vertical {
+    background: {bg_window};
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: {border};
+    min-height: 20px;
+    border-radius: 4px;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QLineEdit, QComboBox {
+    background-color: {bg_elevated};
+    border: 1px solid {border};
+    border-radius: 3px;
+    padding: 4px 6px;
+}
+
+QGroupBox {
+    border: 1px solid {border};
+    border-radius: 3px;
+    margin-top: 10px;
+    padding-top: 8px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    color: {text_secondary};
+}

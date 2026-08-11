@@ -113,3 +113,20 @@ def test_config_error_sentinel_reports_is_error_true(client):
     client._process_audio_buffer()
 
     assert events == [True]
+
+
+def test_unrecognized_codec_id_degrades_to_audio_unavailable_instead_of_crashing(client):
+    """Regression test: decode_audio_header() raises ValueError for a 4-byte
+    codec id it doesn't recognize (neither a known codec nor a disable
+    sentinel) -- previously unguarded here, so it would escape
+    _process_audio_buffer() as an unhandled exception. Video/casting must
+    keep working with audio simply unavailable, the same graceful-degrade
+    behavior as the disable sentinel case above."""
+    events = []
+    client.audio_unavailable.connect(events.append)
+
+    client._audio_recv_buffer.extend(b"\x01\x02\x03\x04")
+    client._process_audio_buffer()  # must not raise
+
+    assert events == [True]
+    assert client._audio_stage == "disabled"

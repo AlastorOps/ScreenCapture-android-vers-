@@ -36,6 +36,11 @@ class AndroidDevice:
     android_version: str | None = None
     api_level: int | None = None
     is_active: bool = False
+    #: Real display capability from `adb shell dumpsys display` (see
+    #: device/display_info.py) -- None until fetched or if detection failed
+    #: on this device/OEM, never a guessed/fabricated value.
+    refresh_rate_hz: int | None = None
+    supported_refresh_rates_hz: tuple[int, ...] | None = None
 
     @property
     def display_serial(self) -> str:

@@ -1,11 +1,97 @@
 # AndroidLink
 
 Android-to-Windows USB companion and control center. Connects an Android phone to a
-Windows PC over USB Type-C for screen casting, remote control, audio, camera/mic
-virtual devices, and recording — no Wi-Fi, cloud, or internet required.
+Windows PC over USB Type-C for screen casting, remote mouse/keyboard control, Android
+audio playback, a phone-camera-as-Windows-webcam and phone-mic-as-Windows-microphone,
+and PC-side recording/screenshots — no Wi-Fi, cloud, or internet required, and nothing
+leaves the machine over USB.
 
-This project is being built in phases (see `prompt.md` for the full spec).
-Implemented so far:
+Every feature above is independently toggleable (Control and Audio require Screen Cast
+to be on, since they share its underlying session — explained in the UI itself; Camera
+and Mic don't). The UI is a dark, compact, dockable-panel desktop app built with
+PySide6, driving a vendored [scrcpy](https://github.com/Genymobile/scrcpy) server
+directly over ADB — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for why there's no
+separate Android companion app to build or install.
+
+**Documentation:**
+[Setup Guide](docs/SETUP.md) ·
+[Troubleshooting](docs/TROUBLESHOOTING.md) ·
+[Architecture](docs/ARCHITECTURE.md)
+(the in-app **Help → Setup Guide** also runs live checks against your actual machine)
+
+## Requirements
+
+* Windows 10/11, 64-bit.
+* An Android phone, Android 10 (API 29) or newer, with a data-capable USB cable.
+* [Android Platform Tools](https://developer.android.com/tools/releases/platform-tools) (`adb`) on your PATH.
+* Optional: [OBS Studio](https://obsproject.com/)/[Unity Capture](https://github.com/schellingb/UnityCapture)
+  for the Camera → virtual webcam feature; [VB-Audio Virtual Cable](https://vb-audio.com/Cable/)/
+  [VoiceMeeter](https://vb-audio.com/Voicemeeter/) for the Mic → virtual microphone feature.
+
+Full step-by-step instructions (including enabling USB debugging on the phone) are in
+[docs/SETUP.md](docs/SETUP.md).
+
+## Installation & running
+
+**Prebuilt exe:** download/build `AndroidLink.exe` (see below) and run it directly — no
+Python install required.
+
+**From source (development):**
+
+```
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[dev]"
+python -m androidlink.app.main
+```
+
+**Testing:**
+
+```
+pytest
+```
+
+**Building the Windows executable:**
+
+```
+pip install -e ".[build]"
+pyinstaller packaging/androidlink.spec --distpath dist --workpath build --noconfirm
+```
+
+Produces `dist/AndroidLink.exe`, a standalone onefile executable (no Python install
+required to run it). The spec bundles the theme's QSS files and the vendored
+scrcpy-server jar. There is no separate "build the Android companion app" step —
+AndroidLink has no companion Android app in its architecture; see
+[docs/ARCHITECTURE.md § No companion Android app](docs/ARCHITECTURE.md#no-companion-android-app)
+for why.
+
+## Virtual webcam / virtual microphone
+
+The Camera feature exposes the phone's camera as a real Windows video-capture device
+(via [pyvirtualcam](https://github.com/letmaik/pyvirtualcam), backed by an existing OBS
+Virtual Camera or Unity Capture install — neither is bundled). The Mic feature exposes
+the phone's microphone as a real Windows input device via a virtual-audio-cable driver
+(e.g. VB-Audio Virtual Cable — Windows has no first-party "virtual microphone" API the
+way it does for webcams). Neither backend is installed automatically (prompt.md section
+25: never silently install drivers) — if AndroidLink reports one missing, it names
+exactly what to install. Full instructions:
+[docs/SETUP.md § 7](docs/SETUP.md#7-virtual-webcam-setup-phone-camera--windows-apps) and
+[§ 8](docs/SETUP.md#8-virtual-microphone-setup-phone-mic--windows-apps).
+
+## Troubleshooting & known hardware limitations
+
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for device/USB/ADB issues, codec
+and decoder errors, camera/microphone permission and virtual-device problems, and
+recording failures — every in-app error message is written to explain what's wrong and
+what to do about it (never a bare "Error: subprocess failed"), and that document expands
+on each one. It also lists known hardware limitations (no GPU usage metric, no camera
+resolution selection, no automatic reconnect-on-launch, etc.) that are deliberate
+platform/scope constraints, not bugs.
+
+## Development phases
+
+This project was built in phases (see `prompt.md` for the full spec). All 9 phases are
+now implemented:
 
 - **Phase 1: project foundation** — application shell, theming, settings persistence, logging.
 - **Phase 2: USB/ADB device detection** — live device list, connect/disconnect.
@@ -14,7 +100,9 @@ Implemented so far:
   are unit-tested against a real H.264 stream, but the end-to-end adb push/reverse
   tunnel/socket path has not been exercised against real hardware (no Android device
   was available during development) — try it with a real device and see
-  `androidlink/streaming/transport.py`'s module docstring for details. **Fullscreen mode**
+  `androidlink/streaming/transport.py`'s module docstring, or
+  [docs/ARCHITECTURE.md § Hardware-verification status](docs/ARCHITECTURE.md#hardware-verification-status),
+  for details. **Fullscreen mode**
   (prompt.md section 8) is available via the Screen panel's Fullscreen button, the F11 key,
   or Escape to exit — it hides everything but the Android screen mirror. Mouse/touch
   coordinate mapping already keys off the render widget's own size rather than a fixed
@@ -36,8 +124,7 @@ Implemented so far:
   the same hardware-unverified caveat as Phases 3-4. **Audio defaults to enabled**
   (`settings.audio.enabled`, defaults `true`) — most people casting the screen also want
   to hear the device, so Cast turning on requests audio automatically unless previously
-  turned off, and that choice persists across restarts like the rest of Phase 9's settings
-  persistence.
+  turned off, and that choice persists across restarts.
 - **Phase 6: Android camera → Windows virtual webcam** — mirrors a device camera into
   a real Windows virtual camera device via
   [pyvirtualcam](https://github.com/letmaik/pyvirtualcam) (OBS Virtual Camera or Unity
@@ -65,7 +152,7 @@ Implemented so far:
   selector exposing scrcpy's protocol-level `audio_source` values (mic,
   mic-unprocessed, mic-voice-communication, mic-voice-recognition, mic-camcorder) — these
   are the sources scrcpy itself supports, not per-device detected capabilities (no
-  companion app exists yet to query Android's AudioManager directly, so this is surfaced
+  companion app exists to query Android's AudioManager directly, so this is surfaced
   honestly as a fixed protocol list rather than faked detection). If no virtual-audio-cable
   driver is installed, the Mic toggle shows a clear message naming what to install rather
   than failing silently or faking output. Device-side mic capture failures are detected
@@ -84,16 +171,55 @@ Implemented so far:
   encoder available, so it genuinely exercises the fallback path every time. Supports
   start/stop/pause/resume, a live recording status and timer, and PC-side screenshots
   (PNG) — all in the Status panel, enabled only while Cast is active since there's nothing
-  to record or screenshot otherwise. Files save to `Videos\AndroidLink` and
-  `Pictures\AndroidLink` by default; a Settings UI to change that location isn't built yet
-  (deferred to Phase 9's full Settings page). When Android audio is enabled, its decoded
+  to record or screenshot otherwise. Save location, format, and quality are configurable
+  from Settings → Recording (Phase 9). When Android audio is enabled, its decoded
   PCM is muxed into the recording too (AAC), via the same audio already being played back
   — no separate capture path, added to the queue alongside video frames and encoded on the
   same background thread. The encoder-selection/fallback logic and the full
   record-then-decode-back round trip (video and video+audio) are tested against real
   written MP4 files, not mocked.
-
-- **Phase 9 (in progress): polish** — two slices done so far:
+- **Phase 9: polish** — complete:
+  - **Customizable/savable panel layout** (prompt.md section 16): Device/Screen/Status
+    are now `QDockWidget`s, so show/hide, rearrange, float, and resize all come from
+    Qt's native dock machinery — a View menu exposes a checkable toggle per panel plus
+    "Restore Default Layout," and the arrangement (`QMainWindow.saveState()`, base64-
+    encoded) persists to `settings.general.layout_state` across restarts. The
+    Performance/Quality slider stays fixed as a non-movable bottom toolbar, not a
+    dockable panel, per the spec. The slider snaps to discrete levels of 10 as you
+    drag it (`ui/widgets/slider_labeled.py`'s `snap_value()`, with tick marks showing
+    where it'll land) rather than stopping at an arbitrary pixel-derived value, and
+    shows a live resolution readout next to it (e.g. "~1080p (1920px)") reflecting the
+    real profile `resolve_streaming_profile()` would use for the next cast —
+    deliberately approximate ("~") since the exact output depends on the connected
+    device's real aspect ratio, not a fabricated exact WxH
+    (`streaming/performance.py`'s `describe_resolution()`); both the snapping and the
+    readout are mirrored in the Settings dialog's copy of the slider.
+  - **Full multi-section Settings page** (prompt.md section 27): General, Streaming
+    (performance/quality default + resolution/FPS/bitrate advanced overrides — codec
+    forcing is greyed out, since scrcpy always auto-selects the device's codec), Audio
+    (enabled/volume/output device — real device picker via `QMediaDevices`), Camera and
+    Microphone (selection/resolution/FPS/input source shown as read-only summaries
+    pointing at the Device panel, where the live, device-dependent controls actually
+    live — volume/mute are directly editable), Recording (save location via a real
+    folder picker overriding the default Videos/Pictures folders, quality → target
+    bitrate; format is MP4-only and greyed out), Device (connected device, and a
+    permanently-disabled "auto-reconnect" checkbox explaining why — it would violate
+    the app's "never auto-connect" principle), and Diagnostics (logging level, debug
+    mode, both applied live). Every control is either wired to a real settings field or
+    visibly disabled with a tooltip explaining why, matching the honesty pattern
+    established in `device_panel.py`.
+  - **Error message catalog** (prompt.md section 21): `androidlink/utils/errors.py`
+    centralizes every user-facing failure (ADB unavailable, device unauthorized/offline/
+    disconnected, unsupported codec, camera/microphone permission denied, virtual
+    camera/microphone unavailable, decoder/encoder failure, USB bandwidth problems, and
+    more) as a message + actionable guidance pair, referenced from
+    `device/manager.py`, `streaming/transport.py`, `camera/*`, `audio/*`, and
+    `recording/*` instead of the ad-hoc strings that used to be scattered across them.
+    Auditing this also found and fixed two real gaps: an unsupported video/audio codec
+    (e.g. a device sending VP8/VP9, or an unrecognized audio codec id) could previously
+    escape as an unhandled exception inside a Qt slot instead of being caught and
+    surfaced as a connection failure — now guarded the same way nearby malformed-data
+    cases already were, with regression tests.
   - **Real Diagnostics** (prompt.md sections 20/33/34: never fabricate a performance
     number). The Status panel's Stream FPS, Render FPS, Dropped Frames, Decode Latency,
     Bitrate, Resolution, and Codec readouts are all genuinely measured — decoded-frame
@@ -102,20 +228,21 @@ Implemented so far:
     (normalized to 0-100% across all cores). "Dropped frames" comes from a real counter
     added to `LatestValueBox` that tracks values overwritten before ever being read, not a
     guess. GPU usage is left as an honest "—" (with a tooltip explaining why) rather than
-    faked — reliable cross-vendor GPU utilization on Windows needs Performance Data Helper
-    counter queries, not implemented yet.
-  - **Settings persistence** (prompt.md section 29): performance/quality slider, Android
-    audio volume/mute, camera selection/FPS, and microphone selection/volume/mute now
-    survive a restart, loaded into their panel controls on launch and saved on change
-    (slider/volume changes save once on release, not per drag tick, to avoid hammering
-    disk). Building this surfaced and fixed two real bugs: populating the camera/FPS
-    dropdowns was firing the same "selection changed" signals a real user action would,
-    which silently overwrote a just-loaded persisted camera selection before it was ever
-    applied — dropdown population is now signal-blocked so only genuine user choices get
-    persisted. Recording's save location and "selected device"/reconnect behavior are
-    intentionally not persisted yet — the former has no Settings UI to change it yet, and
-    the latter interacts with this app's "never auto-connect" principle closely enough
-    that it deserves its own design pass; both are left for later rather than half-wired.
+    faked — reliable cross-vendor GPU utilization on Windows needs Performance Data
+    Helper counter queries, not implemented yet.
+  - **Settings persistence** (prompt.md section 29): performance/quality slider (plus
+    Phase 9's resolution/FPS/bitrate advanced overrides), Android audio volume/mute/output
+    device, camera selection/FPS, microphone selection/volume/mute, recording save
+    location/format/quality, and logging level/debug mode now all survive a restart,
+    loaded into their controls on launch and saved on change (slider/volume changes save
+    once on release, not per drag tick, to avoid hammering disk). Building this surfaced
+    and fixed two real bugs: populating the camera/FPS dropdowns was firing the same
+    "selection changed" signals a real user action would, which silently overwrote a
+    just-loaded persisted camera selection before it was ever applied — dropdown
+    population is now signal-blocked so only genuine user choices get persisted.
+    "Selected device"/reconnect behavior is intentionally not persisted — it interacts
+    with this app's "never auto-connect" principle closely enough that it's a
+    permanently-disabled, explained setting rather than a half-built one.
   - **Setup wizard** (prompt.md section 18): a guided-setup dialog (`setup/wizard.py`,
     `setup/checks.py`) that runs automatically on first launch (and any time after via
     Help → Setup Guide) checking ADB availability, USB device detection, USB debugging
@@ -130,38 +257,181 @@ Implemented so far:
     Automatically" button: every real fix here is either installing third-party software
     or a physical action on the phone itself, neither of which this app should do silently
     (prompt.md sections 25/37) — a "Recheck" button re-runs the real checks instead.
-  - Still open for Phase 9: customizable/savable panel layout, the full multi-section
-    Settings page (Streaming/Camera/Recording/Device/Diagnostics), an error message
-    catalog, and packaging/troubleshooting docs.
-
-## Development setup
-
-```
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e ".[dev]"
-```
-
-## Running
-
-```
-python -m androidlink.app.main
-```
-
-## Testing
-
-```
-pytest
-```
-
-## Building a Windows executable
-
-```
-pip install -e ".[build]"
-pyinstaller packaging/androidlink.spec --distpath dist --workpath build --noconfirm
-```
-
-Produces `dist/AndroidLink.exe`, a standalone onefile executable (no Python install
-required to run it). The spec bundles the theme's QSS files and the vendored
-scrcpy-server jar; later phases that add more vendored binaries (virtual camera/mic
-drivers) will extend `packaging/androidlink.spec`'s `datas`/`binaries` accordingly.
+  - **Packaging & troubleshooting docs**: [docs/SETUP.md](docs/SETUP.md),
+    [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md), and
+    [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), linked from this README.
+  - **Real-hardware bug fix**: extended live testing against a real device (this
+    project's first, once one was actually available) surfaced a genuine adb-server
+    stability bug that manifested as Android Audio/Screen Cast/Camera unexpectedly
+    disconnecting mid-session. `device/manager.py`'s device-info polling could
+    re-spawn an `adb shell getprop` call for the same device on every single 1.5s
+    poll tick indefinitely whenever the previous one never completed (including a
+    separate, real "Internal C++ object already deleted" PySide6/Qt race that could
+    crash the device-list poll handler entirely on Windows) — under sustained real
+    use this measurably destabilized the local adb server (`adb devices` starts
+    returning empty despite the device staying physically connected) enough to drop
+    active `adb reverse` tunnels, which is exactly what scrcpy-server sessions
+    depend on. Both handlers are now guarded against the crash, and a device's info
+    is only ever fetched once at a time. See
+    [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#the-connection-to-the-device-was-lost-mid-session).
+  - **Silent-audio trap fix**: the same real-hardware session also found that
+    installing a virtual-audio-cable driver (e.g. VB-Audio Virtual Cable, to use the
+    Mic feature) can silently become *Windows'* system-wide default playback device
+    — which makes Android Audio's "System Default" output setting decode and play
+    successfully into the cable instead of real speakers, with no error anywhere in
+    the pipeline, just silence. Settings → Audio now detects this
+    (`audio/virtual_audio.py`'s `is_likely_virtual_cable()`) and shows an explicit
+    warning naming the actual device in use, with the fix (pick a real output device
+    there, or change the Windows default) — matching prompt.md section 21/33's "never
+    fail silently."
+  - **Dual audio output**: since a virtual-audio-cable driver is often installed
+    specifically so another app (Discord/OBS/etc.) can pick up the device's audio, not
+    just to avoid it, `AudioPlayback` (audio/playback.py) can now play Android's audio
+    to a *second* output device at the same time as the primary one — e.g. real
+    speakers so you can hear it, and a virtual-audio-cable at once so another app can
+    too, rather than an either/or choice. Settings → Audio's new "Also Output To"
+    picker controls it (`settings.audio.secondary_output_device_id`); picking the same
+    device as the primary output, or a device that's no longer present, degrades
+    gracefully to the primary-only behavior rather than erroring. Verified end-to-end
+    against real hardware: audio streamed continuously to both a real output device and
+    a real VB-Audio Virtual Cable device at once with no drops.
+  - **Settings apply live, not just "next time"**: changing Streaming's Resolution/FPS/
+    Bitrate overrides, the Performance/Quality default, or Audio's Output Device/Also
+    Output To in the Settings dialog now restarts an already-active cast session
+    automatically (`CastingController.restart_if_casting()`) instead of leaving the
+    change stuck until the user manually toggles Cast off and back on — the same way
+    Control/Audio already had to, since scrcpy has no way to change these on a running
+    session. Audio and Microphone Volume/Mute go a step further and apply directly to
+    the live session (no restart, no glitch) via new `apply_audio_volume()`/
+    `apply_audio_muted()`/`apply_volume()`/`apply_muted()` methods on
+    `CastingController`/`MicController`. Verified against real hardware: changing the
+    Resolution override in Settings while actively casting restarted the session with
+    the new resolution automatically, with no manual reconnect.
+  - **Fixed a real race in every restart-on-setting-change path**: the first version of
+    the above (and the pre-existing Control/Audio-toggle and Camera/Mic-selection
+    restarts, which share the same code shape) called `stop()` immediately followed by
+    `start()`. `*Session.stop()` posts a *queued* call to its worker thread, so it
+    returns before the old scrcpy-server process -- and the device's hardware video
+    encoder it's holding -- has actually been torn down. Confirmed directly against real
+    hardware: this let a "new" session start while the old one was still shutting down,
+    silently keeping the old resolution active instead of applying the change (a second
+    `cast_session_started` did fire, but with the *old* dimensions). `CastingController`,
+    `CameraController`, and `MicController` now wait for the old session's `stopped`
+    signal (only emitted once its worker thread has fully unwound) before starting the
+    replacement. Re-verified against real hardware after the fix: the second session
+    genuinely came back at the new resolution (1920×1200 → 1280×800).
+  - **Performance/Quality slider gets its own Refresh button**: the main window's
+    slider bar (unlike the Settings dialog's copy, which restarts automatically the
+    moment you release it) never auto-restarts on drag — doing so on every drag tick
+    would be far more disruptive than useful. Instead, a new "↻ Refresh" button next to
+    the resolution readout applies the current slider position to an already-active
+    cast session on demand (`CastingController.restart_if_casting()`), enabled only
+    while actually casting. Verified against real hardware: dragging the slider alone
+    left the session untouched; clicking Refresh restarted it and the device genuinely
+    switched resolution (1920×1200 → 1280×800).
+- **Phase 10: theme system fix, uncapped FPS, and pipeline performance** — complete:
+  - **Theme fix**: the Theme dropdown in Settings → General was permanently disabled
+    ("Dark" only) and, more importantly, changing the accent color never actually
+    reached every control — `ToggleSwitch` (the Cast/Audio/Mic/Debug Mode toggles
+    throughout the app) hand-paints itself and had captured `palette.DEFAULT_ACCENT`
+    once at construction time, so it stayed the default blue forever regardless of the
+    user's chosen accent, even freshly after picking a custom color. The matching QSS
+    rule for it (`ToggleSwitch[checked="true"]`) was dead code — a hand-painted
+    `QWidget` doesn't apply stylesheet `background-color` from a property selector.
+    Root cause fixed at the architecture level: `ui/themes/palette.py` now holds
+    mutable Dark/Light `Palette` instances plus the current accent as live module
+    state (`palette.current()`/`palette.current_accent()`), and every hand-painted
+    widget (`ToggleSwitch`, `StatusDot`, `VideoRenderWidget`'s letterbox background)
+    reads it fresh inside `paintEvent()` instead of caching a color — so a theme
+    change reaches them with zero per-widget wiring, and a widget created *after* a
+    theme switch already paints correctly. A real Light theme is now implemented (not
+    just scaffolded): `ThemeManager.apply_theme(accent, mode)` builds the app-wide QSS
+    from templated `base.qss.tmpl`/`accent.qss.tmpl` files against whichever palette is
+    active, and `.update()`s every existing widget so hand-painted ones repaint
+    immediately too. Both dark/light mode and the custom accent color persist across
+    restarts (`settings.general.theme`/`accent_color`). Verified: dark→light switch,
+    custom accent reaching a `ToggleSwitch` live, and both surviving a simulated
+    restart.
+  - **Follow-up fix: Settings dialog stayed white regardless of theme.** Caught by
+    actually rendering and inspecting screenshots of the dialog in both modes (not
+    just checking hex values) — the Settings dialog's tab content area (every
+    `QTabWidget` page) stayed a light/white panel in Dark mode too, because on
+    Windows a plain `QWidget` used as a tab page is painted by the native style using
+    the system window color instead of inheriting the `QDialog { background-color:
+    ... }` rule above it. Fixed with explicit `QTabWidget::pane`/`QTabBar::tab`/
+    `QTabWidget QWidget` rules in `base.qss.tmpl`. Re-verified visually across the
+    General and Streaming tabs in both themes after the fix.
+  - **More theme presets, not just Dark/Light**: `ui/themes/palette.py` is now an open
+    registry (`palette.PRESETS`, keyed by preset id) instead of two hardcoded
+    `Palette` constants — Settings → General's Theme dropdown is built directly from
+    that registry, so adding a new preset is just adding another `Palette(...)` there,
+    nothing else in the app needs to change. Four new presets ship alongside Dark/
+    Light: **Midnight** (a deeper navy-black dark variant), **Nord**, **Solarized
+    Dark**, and **Solarized Light** (the latter two using the real published Nord/
+    Solarized color values, not approximations). `GeneralSettings.theme` is a plain
+    `str` rather than a fixed `Literal` for the same reason — an unrecognized/removed
+    preset id falls back to Dark (`palette.set_theme()`) rather than failing
+    validation. Verified by rendering and inspecting actual screenshots of the
+    Settings dialog and main window under Nord, Solarized Light, and Midnight, not
+    just checking hex values.
+  - **Removed the hardcoded 60fps cap**: `streaming/performance.py` unconditionally
+    requested `max_fps=60` for every session regardless of what the device's screen
+    could actually do, and Settings → Streaming's FPS dropdown only ever offered
+    "Automatic (60)" / 30 / 60 — so even a 90/120/144Hz device was silently capped.
+    A new `device/display_info.py` parses `adb shell dumpsys display` (the same
+    source every other screen-mirroring tool ultimately reads) for the device's real
+    active and hardware-supported refresh rates, fetched once per connection by
+    `DeviceManager` alongside the existing model/Android-version lookup (with the same
+    "never retry a permanent parse failure every poll" guard that a previous real bug
+    in this codebase needed). "Automatic" FPS now targets that detected rate instead
+    of a fixed number; Settings → Streaming's FPS dropdown is now built dynamically
+    from the connected device's actual supported list, and the main window/Settings
+    resolution readouts both show the live `@ N fps` target. Verified against a real
+    165Hz-capable device (Lenovo TB321FU, currently running at 120Hz): detection
+    reported `120Hz active, supports (30, 60, 90, 120, 144, 165)`, and a live cast
+    session genuinely requested and started at `max_fps=120` (previously always 60).
+  - **Real hardware-accelerated video decode**: `streaming/decoder.py`'s docstring
+    claimed FFmpeg picks a hardware decoder (D3D11VA/DXVA2/NVDEC) automatically —
+    checked directly against this project's actual PyAV 18 install and that turned out
+    to be false: `av.CodecContext.create()` alone always decodes in software, and
+    `CodecContext.hwaccel` isn't even settable after construction. Fixed by requesting
+    D3D11VA (falling back to the older DXVA2, then software) explicitly via
+    `CodecContext.create(..., hwaccel=HWAccel(...))`, decided once at session start —
+    verified against this project's own real H.264 fixture that both backends decode
+    correctly and `frame.to_ndarray()` transparently downloads/converts the GPU-
+    resident frame, so nothing downstream needed to change. `hardware_accelerated` is
+    exposed per-session and shown in the Status panel's Codec readout as "H264 (HW)"/
+    "(SW)". A first attempt also retried a failed decode by rebuilding the codec
+    context in software mid-session — reverted after it broke a real regression test
+    (`test_recovers_from_a_corrupt_packet_without_desyncing`): rebuilding the context
+    to retry discarded the decoder's reference-frame state, so the *next legitimate*
+    frame after a single bad packet silently failed too. The existing per-packet
+    exception handling in `streaming/transport.py` already recovers from a bad packet
+    correctly without that risk, so hw/software is now decided once at construction
+    and left alone. Verified live: `Video decode: using hardware acceleration
+    (d3d11va)` logged and confirmed on a real cast session.
+  - **Latency: TCP_NODELAY on every streaming socket**: none of the video/audio/
+    control sockets (`streaming/transport.py`, `camera/camera_session.py`,
+    `audio/mic_session.py`) had ever disabled Nagle's algorithm, which can batch small
+    writes for tens of milliseconds waiting for a full segment or peer ACK — latency a
+    real-time control/video/audio socket shouldn't be paying, on a loopback `adb
+    reverse` connection same as a real network one. All now set Qt's
+    `LowDelayOption` (`TCP_NODELAY`) right after accepting the connection.
+  - **Frame queue / low-latency delivery** (prompt.md sections 11/34) was already
+    correctly architected before this phase and didn't need changing: `LatestValueBox`
+    holds at most one pending frame, so a consumer that falls behind gets the newest
+    frame instead of an accumulating backlog, with a genuine dropped-frame counter
+    (not fabricated) surfaced in Diagnostics.
+  - **FPS is deliberately not traded off by the Performance/Quality slider**: only
+    resolution and bitrate move along it now (previously all three anchor profiles
+    hardcoded the same 60). Automatic FPS targets the same detected device rate at
+    every slider position; a lighter resolution/bitrate budget at the Performance end
+    make a high frame rate easier to sustain in practice than the number "60" ever
+    did on its own, matching prompt.md section 12's Performance-favors-FPS /
+    Quality-favors-resolution intent without inventing an unmeasured FPS-vs-quality
+    tradeoff curve.
+  - Diagnostics continue to report only genuinely measured values — the live run that
+    verified all of the above requested 120fps at 1920×1200 and *measured* 88fps
+    actually decoded, which is reported as-is rather than rounded up to the target;
+    the real bottleneck at that combination is the device's own encoder/USB throughput,
+    not anything left uncapped in this app's Python/Qt pipeline.

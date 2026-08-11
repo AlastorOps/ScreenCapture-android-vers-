@@ -23,10 +23,10 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import QMetaObject, QObject, QProcess, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
+from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
 
 from androidlink.camera.virtual_camera import VirtualCameraSink, VirtualCameraUnavailableError
-from androidlink.streaming.decoder import VideoDecoder
+from androidlink.streaming.decoder import UnsupportedCodecError, VideoDecoder
 from androidlink.streaming.protocol import (
     DEVICE_NAME_FIELD_LENGTH,
     PACKET_HEADER_LENGTH,
@@ -40,6 +40,7 @@ from androidlink.streaming.protocol import (
     generate_scid,
     parse_packet_header,
 )
+from androidlink.utils import errors
 from androidlink.utils.latest_value_box import LatestValueBox
 
 logger = logging.getLogger(__name__)
@@ -107,18 +108,18 @@ class CameraClient(QObject):
         )
         if not ok:
             logger.error("adb push scrcpy-server failed: %s", output)
-            self.connection_failed.emit("Could not push scrcpy-server to the device")
+            self.connection_failed.emit(errors.SERVER_PUSH_FAILED.text)
             return
 
         local_port = self._open_listener_and_reverse_tunnel()
         if local_port is None:
-            self.connection_failed.emit("Could not set up the ADB reverse tunnel")
+            self.connection_failed.emit(errors.REVERSE_TUNNEL_FAILED.text)
             return
 
         self._tcp_server.newConnection.connect(self._on_new_connection)
 
         if not self._launch_server_process():
-            self.connection_failed.emit("Could not launch scrcpy-server on the device")
+            self.connection_failed.emit(errors.SERVER_LAUNCH_FAILED.text)
 
     @Slot()
     def stop(self) -> None:
@@ -246,13 +247,15 @@ class CameraClient(QObject):
         if self._tcp_server is None or self._video_socket is not None:
             return
         self._video_socket = self._tcp_server.nextPendingConnection()
+        # See streaming/transport.py's _disable_nagle() for why.
+        self._video_socket.setSocketOption(QAbstractSocket.SocketOption.LowDelayOption, 1)
         self._video_socket.readyRead.connect(self._on_video_ready_read)
         self._video_socket.disconnected.connect(self._on_video_disconnected)
 
     def _on_video_disconnected(self) -> None:
         if not self._stopping:
             logger.warning("scrcpy-server camera socket disconnected unexpectedly")
-            self.connection_failed.emit("The connection to the device was lost")
+            self.connection_failed.emit(errors.DEVICE_DISCONNECTED.text)
 
     def _on_video_ready_read(self) -> None:
         self._recv_buffer.extend(bytes(self._video_socket.readAll()))
@@ -290,11 +293,18 @@ class CameraClient(QObject):
                             meta.width,
                             meta.height,
                         )
-                        self.connection_failed.emit("Received corrupt camera stream data")
+                        self.connection_failed.emit(errors.CORRUPT_STREAM_DATA.text)
                         return
                     if self._decoder is not None:
                         self._decoder.close()
-                    self._decoder = VideoDecoder(self._codec_name)
+                    try:
+                        self._decoder = VideoDecoder(self._codec_name)
+                    except UnsupportedCodecError:
+                        logger.error("Unsupported camera video codec: %s", self._codec_name)
+                        self.connection_failed.emit(
+                            errors.unsupported_video_codec(self._codec_name).text
+                        )
+                        return
                     self._start_virtual_camera(meta.width, meta.height)
                 else:
                     self._pending_frame_meta = meta
@@ -332,7 +342,7 @@ class CameraClient(QObject):
             self._sink = VirtualCameraSink(width, height, self._camera_fps)
         except VirtualCameraUnavailableError as exc:
             logger.warning("Virtual camera unavailable: %s", exc)
-            self.virtual_camera_unavailable.emit(str(exc))
+            self.virtual_camera_unavailable.emit(errors.virtual_camera_unavailable(str(exc)).text)
             return
 
         logger.info(

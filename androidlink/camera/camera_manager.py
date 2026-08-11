@@ -14,6 +14,7 @@ from PySide6.QtCore import QObject, QProcess, Signal
 
 from androidlink.camera.camera_list import parse_camera_list
 from androidlink.streaming.protocol import SCRCPY_SERVER_VERSION, build_list_cameras_args, generate_scid
+from androidlink.utils import errors
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class CameraManager(QObject):
     def _on_push_finished(self, exit_code: int, adb_path: Path, serial: str, _jar: Path) -> None:
         self._process = None
         if exit_code != 0:
-            self.list_failed.emit("Could not push scrcpy-server to the device")
+            self.list_failed.emit(errors.SERVER_PUSH_FAILED.text)
             return
 
         args = [
@@ -89,4 +90,4 @@ class CameraManager(QObject):
         if self._process is not None:
             self._process = None
             logger.error("Camera list process error: %s", error)
-            self.list_failed.emit("Could not query the device's cameras")
+            self.list_failed.emit(errors.QUERY_CAMERAS_FAILED.text)

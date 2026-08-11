@@ -33,19 +33,23 @@ def get_logs_dir() -> Path:
     return path
 
 
-def get_recordings_dir() -> Path:
-    """Default PC-side recording save location (prompt.md section 14).
-    Not yet user-configurable via Settings -- that's part of the full
-    Settings page deferred to Phase 9 (prompt.md section 27's "Recording:
-    Save location"); the underlying storage location is real, just not yet
-    exposed as a preference."""
-    path = Path(user_videos_dir()) / APP_NAME
+def get_recordings_dir(override: str | None = None) -> Path:
+    """PC-side recording save location (prompt.md section 14). `override`
+    is settings.recording.save_directory (prompt.md section 27's Recording
+    > Save location, set via a real folder picker in the Settings dialog);
+    when unset, falls back to the OS's Videos folder."""
+    path = Path(override) if override else Path(user_videos_dir()) / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def get_screenshots_dir() -> Path:
-    path = Path(user_pictures_dir()) / APP_NAME
+def get_screenshots_dir(override: str | None = None) -> Path:
+    """Same as get_recordings_dir(), but for PC-side screenshots. Settings
+    has a single "Save location" that covers both (prompt.md section 27)
+    rather than two separate pickers; screenshots go in a subfolder of it so
+    an overridden directory doesn't mix videos and images together the way
+    the separate default OS folders (Videos vs. Pictures) never did."""
+    path = Path(override) / "Screenshots" if override else Path(user_pictures_dir()) / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 

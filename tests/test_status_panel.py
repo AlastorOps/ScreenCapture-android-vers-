@@ -34,6 +34,25 @@ def test_set_stream_stats_updates_labels(qtbot):
     assert panel._value_labels["codec"].text() == "H264"
 
 
+def test_set_stream_stats_shows_hardware_decode_status(qtbot):
+    panel = StatusPanel()
+    qtbot.addWidget(panel)
+
+    hw_sample = DiagnosticsSample(
+        stream_fps=60.0, dropped_frames=0, decode_latency_ms=1.0, bitrate_bps=1_000_000,
+        resolution=(1920, 1080), codec="h264", hardware_decode=True,
+    )
+    panel.set_stream_stats(hw_sample)
+    assert panel._value_labels["codec"].text() == "H264 (HW)"
+
+    sw_sample = DiagnosticsSample(
+        stream_fps=60.0, dropped_frames=0, decode_latency_ms=1.0, bitrate_bps=1_000_000,
+        resolution=(1920, 1080), codec="h264", hardware_decode=False,
+    )
+    panel.set_stream_stats(sw_sample)
+    assert panel._value_labels["codec"].text() == "H264 (SW)"
+
+
 def test_reset_stream_stats_clears_to_em_dash(qtbot):
     panel = StatusPanel()
     qtbot.addWidget(panel)

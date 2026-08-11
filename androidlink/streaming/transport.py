@@ -19,11 +19,11 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QMetaObject, QObject, QProcess, QTimer, Qt, QThread, Signal, Slot
-from PySide6.QtNetwork import QHostAddress, QTcpServer, QTcpSocket
+from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
 
-from androidlink.audio.decoder import AudioDecoder
+from androidlink.audio.decoder import AudioDecoder, UnsupportedAudioCodecError
 from androidlink.audio.playback import AudioPlayback
-from androidlink.streaming.decoder import VideoDecoder
+from androidlink.streaming.decoder import UnsupportedCodecError, VideoDecoder
 from androidlink.streaming.diagnostics import DiagnosticsSample
 from androidlink.streaming.performance import StreamingProfile
 from androidlink.streaming.protocol import (
@@ -41,6 +41,7 @@ from androidlink.streaming.protocol import (
     generate_scid,
     parse_packet_header,
 )
+from androidlink.utils import errors
 from androidlink.utils.latest_value_box import LatestValueBox
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,18 @@ STATS_INTERVAL_MS = 1000
 
 def _is_plausible_frame_size(width: int, height: int) -> bool:
     return 0 < width <= MAX_PLAUSIBLE_FRAME_DIMENSION and 0 < height <= MAX_PLAUSIBLE_FRAME_DIMENSION
+
+
+def _disable_nagle(socket: QTcpSocket) -> None:
+    """Nagle's algorithm (on by default) batches small writes for up to
+    ~40-200ms waiting for either a full segment or a peer ACK before sending
+    -- latency a real-time video/audio/control socket shouldn't be paying,
+    and nothing in this codebase set TCP_NODELAY before now. Qt's
+    LowDelayOption is a direct wrapper around setsockopt(TCP_NODELAY); the
+    OS's TCP stack applies it the same way to a loopback socket (which is
+    what `adb reverse` traffic over USB actually rides on, on the PC side)
+    as to a real network one."""
+    socket.setSocketOption(QAbstractSocket.SocketOption.LowDelayOption, 1)
 
 
 class ScrcpyVideoClient(QObject):
@@ -77,6 +90,8 @@ class ScrcpyVideoClient(QObject):
         frame_box: LatestValueBox,
         enable_control: bool = False,
         enable_audio: bool = False,
+        audio_output_device_id: bytes | None = None,
+        audio_secondary_output_device_id: bytes | None = None,
     ) -> None:
         super().__init__()
         self._adb_path = adb_path
@@ -86,6 +101,8 @@ class ScrcpyVideoClient(QObject):
         self._frame_box = frame_box
         self._enable_control = enable_control
         self._enable_audio = enable_audio
+        self._audio_output_device_id = audio_output_device_id
+        self._audio_secondary_output_device_id = audio_secondary_output_device_id
 
         self._scid = generate_scid()
         self._tcp_server: QTcpServer | None = None
@@ -123,18 +140,18 @@ class ScrcpyVideoClient(QObject):
     @Slot()
     def start(self) -> None:
         if not self._push_server():
-            self.connection_failed.emit("Could not push scrcpy-server to the device")
+            self.connection_failed.emit(errors.SERVER_PUSH_FAILED.text)
             return
 
         local_port = self._open_listener_and_reverse_tunnel()
         if local_port is None:
-            self.connection_failed.emit("Could not set up the ADB reverse tunnel")
+            self.connection_failed.emit(errors.REVERSE_TUNNEL_FAILED.text)
             return
 
         self._tcp_server.newConnection.connect(self._on_new_connection)
 
         if not self._launch_server_process():
-            self.connection_failed.emit("Could not launch scrcpy-server on the device")
+            self.connection_failed.emit(errors.SERVER_LAUNCH_FAILED.text)
             return
 
         self._stats_timer = QTimer(self)
@@ -297,19 +314,22 @@ class ScrcpyVideoClient(QObject):
         # in the vendored jar.
         if self._video_socket is None:
             self._video_socket = self._tcp_server.nextPendingConnection()
+            _disable_nagle(self._video_socket)
             self._video_socket.readyRead.connect(self._on_video_ready_read)
             self._video_socket.disconnected.connect(self._on_video_disconnected)
         elif self._enable_audio and self._audio_socket is None:
             self._audio_socket = self._tcp_server.nextPendingConnection()
+            _disable_nagle(self._audio_socket)
             self._audio_socket.readyRead.connect(self._on_audio_ready_read)
             self._audio_socket.disconnected.connect(self._on_audio_disconnected)
         elif self._enable_control and self._control_socket is None:
             self._control_socket = self._tcp_server.nextPendingConnection()
+            _disable_nagle(self._control_socket)
 
     def _on_video_disconnected(self) -> None:
         if not self._stopping:
             logger.warning("scrcpy-server video socket disconnected unexpectedly")
-            self.connection_failed.emit("The connection to the device was lost")
+            self.connection_failed.emit(errors.DEVICE_DISCONNECTED.text)
 
     def _on_audio_disconnected(self) -> None:
         if not self._stopping:
@@ -349,6 +369,7 @@ class ScrcpyVideoClient(QObject):
             bitrate_bps=float(self._bytes_received) * 8 * (1000 / STATS_INTERVAL_MS),
             resolution=self._last_resolution,
             codec=self._codec_name,
+            hardware_decode=self._decoder.hardware_accelerated if self._decoder is not None else None,
         )
         self.stats_updated.emit(sample)
         self._decoded_frame_count = 0
@@ -392,12 +413,19 @@ class ScrcpyVideoClient(QObject):
                             meta.width,
                             meta.height,
                         )
-                        self.connection_failed.emit("Received corrupt video stream data")
+                        self.connection_failed.emit(errors.CORRUPT_STREAM_DATA.text)
                         return
                     # A new encoder session always means fresh SPS/PPS.
                     if self._decoder is not None:
                         self._decoder.close()
-                    self._decoder = VideoDecoder(self._codec_name)
+                    try:
+                        self._decoder = VideoDecoder(self._codec_name)
+                    except UnsupportedCodecError:
+                        logger.error("Unsupported video codec: %s", self._codec_name)
+                        self.connection_failed.emit(
+                            errors.unsupported_video_codec(self._codec_name).text
+                        )
+                        return
                     self._last_resolution = (meta.width, meta.height)
                     self.session_started.emit(meta.width, meta.height)
                 else:
@@ -452,7 +480,19 @@ class ScrcpyVideoClient(QObject):
                     return
                 raw = bytes(self._audio_recv_buffer[:4])
                 del self._audio_recv_buffer[:4]
-                result = decode_audio_header(raw)
+                try:
+                    result = decode_audio_header(raw)
+                except ValueError:
+                    # An unrecognized 4-byte codec id -- either a corrupt
+                    # header or a codec this build's protocol.py doesn't
+                    # know about. Audio degrades gracefully rather than
+                    # tearing down the whole (video-carrying) session, the
+                    # same way a device-reported AudioStreamUnavailable
+                    # already does below.
+                    logger.error("Unrecognized audio codec header; continuing without audio")
+                    self.audio_unavailable.emit(True)
+                    self._audio_stage = "disabled"
+                    return
 
                 if isinstance(result, AudioStreamUnavailable):
                     logger.warning(
@@ -463,8 +503,22 @@ class ScrcpyVideoClient(QObject):
                     self._audio_stage = "disabled"
                     return
 
-                self._audio_decoder = AudioDecoder(result)
-                self._audio_playback = AudioPlayback()
+                try:
+                    self._audio_decoder = AudioDecoder(result)
+                    self._audio_playback = AudioPlayback(
+                        self._audio_output_device_id, self._audio_secondary_output_device_id
+                    )
+                except UnsupportedAudioCodecError:
+                    logger.error("Unsupported audio codec: %s", result)
+                    self.audio_unavailable.emit(True)
+                    self._audio_stage = "disabled"
+                    return
+                except RuntimeError:
+                    logger.error("No audio output device available; continuing without audio")
+                    self.audio_unavailable.emit(True)
+                    self._audio_stage = "disabled"
+                    return
+
                 self._audio_playback.start()
                 self._audio_playback.set_volume(self._audio_volume)
                 self._audio_playback.set_muted(self._audio_muted)
@@ -563,6 +617,8 @@ class CastingSession(QObject):
         profile: StreamingProfile,
         enable_control: bool = False,
         enable_audio: bool = False,
+        audio_output_device_id: bytes | None = None,
+        audio_secondary_output_device_id: bytes | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -576,6 +632,8 @@ class CastingSession(QObject):
             self._frame_box,
             enable_control,
             enable_audio,
+            audio_output_device_id,
+            audio_secondary_output_device_id,
         )
         self._client.moveToThread(self._thread)
 

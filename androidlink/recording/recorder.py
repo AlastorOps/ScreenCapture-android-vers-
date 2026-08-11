@@ -48,6 +48,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from androidlink.streaming.protocol import AUDIO_SAMPLE_RATE
+from androidlink.utils import errors
 
 try:
     import av
@@ -110,18 +111,29 @@ class VideoRecorder(QObject):
     def is_recording(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, path: Path, width: int, height: int, fps: int, *, has_audio: bool = False) -> None:
+    def start(
+        self,
+        path: Path,
+        width: int,
+        height: int,
+        fps: int,
+        *,
+        has_audio: bool = False,
+        video_bit_rate: int | None = None,
+    ) -> None:
         if self.is_recording:
             return
         if av is None:
-            self.error.emit("PyAV (the 'av' package) is not installed")
+            self.error.emit(errors.ENCODER_UNAVAILABLE.text)
             return
 
         self._dropped_frames = 0
         self._paused.clear()
         self._queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
         self._thread = threading.Thread(
-            target=self._run, args=(path, width, height, fps, has_audio), daemon=True
+            target=self._run,
+            args=(path, width, height, fps, has_audio, video_bit_rate),
+            daemon=True,
         )
         self._thread.start()
 
@@ -165,7 +177,15 @@ class VideoRecorder(QObject):
             except queue.Full:
                 pass
 
-    def _run(self, path: Path, width: int, height: int, fps: int, has_audio: bool) -> None:
+    def _run(
+        self,
+        path: Path,
+        width: int,
+        height: int,
+        fps: int,
+        has_audio: bool,
+        video_bit_rate: int | None = None,
+    ) -> None:
         try:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             encoder_name = select_video_encoder(width, height, fps)
@@ -174,6 +194,11 @@ class VideoRecorder(QObject):
             video_stream.width = width
             video_stream.height = height
             video_stream.pix_fmt = "yuv420p"
+            if video_bit_rate:
+                # prompt.md section 27's Recording > Quality setting; left
+                # unset (the encoder's own default) unless the user picked
+                # something other than "Standard".
+                video_stream.bit_rate = video_bit_rate
 
             audio_stream = None
             audio_resampler = None
@@ -184,7 +209,7 @@ class VideoRecorder(QObject):
                 )
         except Exception as exc:
             logger.exception("Could not start recording")
-            self.error.emit(f"Could not start recording: {exc}")
+            self.error.emit(errors.encoder_failure(str(exc)).text)
             self._thread = None
             return
 

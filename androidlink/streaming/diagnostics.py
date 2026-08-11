@@ -16,3 +16,4 @@ class DiagnosticsSample:
     bitrate_bps: float  # bytes actually received on the video socket this window, x8
     resolution: tuple[int, int] | None
     codec: str | None
+    hardware_decode: bool | None = None  # None until a decoder exists for this session

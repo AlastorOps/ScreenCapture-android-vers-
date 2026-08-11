@@ -46,6 +46,22 @@ def find_virtual_cable_output_device() -> QAudioDevice | None:
     return None
 
 
+def is_likely_virtual_cable(device: QAudioDevice) -> bool:
+    """True if `device` looks like a virtual-audio-cable's playback
+    endpoint (same name-matching find_virtual_cable_output_device() uses).
+
+    Used the other direction from that function's own purpose: not to find
+    a cable to route the *microphone* into, but to warn when Android Audio
+    (prompt.md section 10, PC playback of the device's audio) is about to
+    play into one via QMediaDevices.defaultAudioOutput() -- confirmed via a
+    real installed VB-Audio Virtual Cable to silently become the Windows
+    default output device, which makes AndroidLink's audio pipeline work
+    perfectly while producing no audible sound at all, since nothing
+    "listens" to a cable's input side without a separate monitoring setup.
+    """
+    return any(name in device.description().lower() for name in _KNOWN_VIRTUAL_CABLE_NAMES)
+
+
 class VirtualMicrophoneSink:
     """Writes interleaved 16-bit PCM into a virtual audio cable's playback
     endpoint via QAudioSink. Mirrors audio/playback.py's AudioPlayback
@@ -55,9 +71,12 @@ class VirtualMicrophoneSink:
     def __init__(self) -> None:
         device = find_virtual_cable_output_device()
         if device is None:
+            # Just the technical fact -- utils/errors.py's
+            # virtual_microphone_unavailable() supplies the actionable
+            # "install X" guidance at the call site (mic_session.py), so
+            # this message isn't duplicated when the two are combined.
             raise VirtualMicrophoneUnavailableError(
-                "No virtual audio cable driver found. Install VB-Audio "
-                "Virtual Cable (or VoiceMeeter), then try again."
+                "No virtual audio cable driver (e.g. VB-Audio Virtual Cable, VoiceMeeter) was detected"
             )
 
         audio_format = QAudioFormat()

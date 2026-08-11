@@ -2,12 +2,28 @@
 scrcpy encoder parameters, so the user never has to think in bitrate/codec
 terms unless they open Advanced Settings.
 
-All profiles request 60fps and instruct the client to always prefer fresh
-frames over stale buffered ones (prompt.md section 34) — only resolution and
-bitrate trade off along the slider.
+FPS is intentionally *not* one of the things this slider trades off: earlier
+this always requested a hardcoded 60fps regardless of what the connected
+device's screen could actually do, silently capping every device -- even a
+120Hz/165Hz panel -- at 60. FPS now defaults to "Automatic", which targets
+the device's own detected refresh rate (device/display_info.py) rather than
+a fixed number, and is otherwise driven independently by
+StreamingSettings.fps_override (a specific manual choice, e.g. "90"). What
+the slider actually trades off is resolution and bitrate -- prioritizing
+FPS/low-latency (small, cheap-to-encode/decode/transport frames) at the
+Performance end vs. resolution/image quality (larger, heavier frames) at the
+Quality end, per prompt.md section 12: a lighter total frame budget makes it
+easier to sustain a high frame rate in practice than the number "60" ever
+did on its own.
+
+Every profile also instructs the client to always prefer fresh frames over
+stale buffered ones (prompt.md section 34) — this is what actually keeps
+latency bounded regardless of resolution/FPS; see utils/latest_value_box.py.
 """
 
 from dataclasses import dataclass
+
+from androidlink.device.display_info import FALLBACK_HZ
 
 
 @dataclass(frozen=True)
@@ -18,17 +34,59 @@ class StreamingProfile:
     prefer_fresh_frames: bool = True
 
 
-_PERFORMANCE = StreamingProfile(max_size=1280, max_fps=60, video_bit_rate=4_000_000)
-_BALANCED = StreamingProfile(max_size=1920, max_fps=60, video_bit_rate=12_000_000)
-_QUALITY = StreamingProfile(max_size=2560, max_fps=60, video_bit_rate=24_000_000)
+_PERFORMANCE = StreamingProfile(max_size=1280, max_fps=FALLBACK_HZ, video_bit_rate=4_000_000)
+_BALANCED = StreamingProfile(max_size=1920, max_fps=FALLBACK_HZ, video_bit_rate=12_000_000)
+_QUALITY = StreamingProfile(max_size=2560, max_fps=FALLBACK_HZ, video_bit_rate=24_000_000)
+
+# Common shorthand names for the three preset anchor points, used only to
+# label the slider for the user (prompt.md section 6) -- purely cosmetic,
+# doesn't affect what's actually requested from the device.
+_RESOLUTION_LABELS = [
+    (_PERFORMANCE.max_size, "720p"),
+    (_BALANCED.max_size, "1080p"),
+    (_QUALITY.max_size, "1440p"),
+]
 
 
 def _lerp(a: int, b: int, t: float) -> int:
     return round(a + (b - a) * t)
 
 
-def resolve_streaming_profile(slider_value: int) -> StreamingProfile:
-    """slider_value: 0 = full Performance, 100 = full Quality, 50 = Balanced."""
+def describe_resolution(max_size: int) -> str:
+    """Human-readable label for a StreamingProfile's max_size (scrcpy's
+    long-edge cap -- see build_server_launch_args()'s `max_size` in
+    protocol.py). Deliberately approximate ("~1080p") rather than a fake
+    exact WxH: scrcpy scales so neither dimension exceeds max_size while
+    preserving the device's real aspect ratio, which isn't known until a
+    device is actually connected, so an exact pixel pair would overstate
+    the precision this setting actually has (prompt.md section 34: report
+    real behavior, not fabricated precision). The literal px value is shown
+    alongside it for users who want the exact number scrcpy will receive.
+    """
+    nearest_label = min(_RESOLUTION_LABELS, key=lambda pair: abs(pair[0] - max_size))[1]
+    return f"~{nearest_label} ({max_size}px)"
+
+
+def resolve_streaming_profile(
+    slider_value: int,
+    *,
+    max_size_override: int | None = None,
+    max_fps_override: int | None = None,
+    bitrate_override_mbps: float | None = None,
+    automatic_fps: int = FALLBACK_HZ,
+) -> StreamingProfile:
+    """slider_value: 0 = full Performance, 100 = full Quality, 50 = Balanced.
+
+    The overrides (prompt.md section 27's Streaming "Advanced options") are
+    layered on top of the slider-derived profile rather than replacing it
+    entirely -- any left as None still falls back to the slider's value, so
+    setting just e.g. a bitrate override doesn't also freeze resolution/FPS.
+
+    automatic_fps: what "Automatic" FPS resolves to when max_fps_override is
+    None -- callers should pass the connected device's real detected refresh
+    rate (device/display_info.py) here; the FALLBACK_HZ default only applies
+    when no device is connected yet or detection genuinely failed.
+    """
     value = max(0, min(100, slider_value))
 
     if value <= 50:
@@ -39,7 +97,11 @@ def resolve_streaming_profile(slider_value: int) -> StreamingProfile:
         low, high = _BALANCED, _QUALITY
 
     return StreamingProfile(
-        max_size=_lerp(low.max_size, high.max_size, t),
-        max_fps=60,
-        video_bit_rate=_lerp(low.video_bit_rate, high.video_bit_rate, t),
+        max_size=max_size_override or _lerp(low.max_size, high.max_size, t),
+        max_fps=max_fps_override or automatic_fps,
+        video_bit_rate=(
+            round(bitrate_override_mbps * 1_000_000)
+            if bitrate_override_mbps
+            else _lerp(low.video_bit_rate, high.video_bit_rate, t)
+        ),
     )

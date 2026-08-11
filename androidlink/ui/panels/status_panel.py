@@ -98,7 +98,10 @@ class StatusPanel(BasePanel):
                 f"{sample.resolution[0]} × {sample.resolution[1]}"
             )
         if sample.codec is not None:
-            self._value_labels["codec"].setText(sample.codec.upper())
+            suffix = ""
+            if sample.hardware_decode is not None:
+                suffix = " (HW)" if sample.hardware_decode else " (SW)"
+            self._value_labels["codec"].setText(sample.codec.upper() + suffix)
 
     def set_render_fps(self, fps: float) -> None:
         self._value_labels["render_fps"].setText(f"{fps:.0f}")

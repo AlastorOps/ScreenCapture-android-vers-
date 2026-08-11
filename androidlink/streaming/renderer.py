@@ -83,7 +83,7 @@ class VideoRenderWidget(QWidget):
 
     def paintEvent(self, event) -> None:  # noqa: ANN001
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(palette.BG_WINDOW))
+        painter.fillRect(self.rect(), QColor(palette.current().bg_window))
 
         if self._image is None:
             return
