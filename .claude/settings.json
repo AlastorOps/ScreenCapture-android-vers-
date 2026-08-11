@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(taskkill //PID 7808 //F)",
+      "Bash(curl -sI --max-time 5 https://github.com)",
+      "Bash(where java *)",
+      "Bash(java -version)",
+      "Bash(gh release *)",
+      "Bash(curl -s --max-time 10 https://api.github.com/repos/Genymobile/scrcpy/releases/latest)",
+      "Bash(xargs cat)",
+      "Bash(xargs -I{} sh -c 'echo ==={}===; cat {}')",
+      "Bash(ffmpeg -version)",
+      "Bash(curl -s --max-time 10 https://github.com/Genymobile/scrcpy/releases/download/v4.1/SHA256SUMS.txt)",
+      "Bash(curl -sL --max-time 15 -o /tmp/SHA256SUMS.txt https://github.com/Genymobile/scrcpy/releases/download/v4.1/SHA256SUMS.txt)",
+      "Read(//tmp/**)"
+    ]
+  }
+}
