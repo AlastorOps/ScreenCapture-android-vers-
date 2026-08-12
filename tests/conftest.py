@@ -20,7 +20,6 @@ def build_settings_dialog(
     device_manager: DeviceManager,
     *,
     on_accent_changed=lambda _c: None,
-    on_performance_default_changed=lambda _v: None,
     on_theme_mode_changed=lambda _m: None,
     parent=None,
 ) -> SettingsDialog:
@@ -43,7 +42,6 @@ def build_settings_dialog(
         casting_controller=casting_controller,
         mic_controller=mic_controller,
         on_accent_changed=on_accent_changed,
-        on_performance_default_changed=on_performance_default_changed,
         on_theme_mode_changed=on_theme_mode_changed,
         parent=parent,
     )

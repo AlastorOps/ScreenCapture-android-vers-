@@ -11,6 +11,9 @@ from androidlink.ui.widgets.status_dot import StatusDot, StatusState
 # reading without a substantial PDH-counter implementation); shown as a
 # permanent "—" with a tooltip rather than a fabricated number.
 _STREAM_METRICS = [
+    ("performance_quality", "Performance/Quality"),
+    ("display_refresh", "Display Refresh"),
+    ("target_fps", "Target FPS"),
     ("stream_fps", "Stream FPS"),
     ("render_fps", "Render FPS"),
     ("dropped", "Dropped Frames"),
@@ -89,7 +92,11 @@ class StatusPanel(BasePanel):
         self._recording_start_time: float | None = None
 
     def set_stream_stats(self, sample) -> None:
-        self._value_labels["stream_fps"].setText(f"{sample.stream_fps:.0f}")
+        # One decimal place -- these are genuinely measured, sub-integer-
+        # precise values (e.g. "164.7"), unlike the plain-integer Target FPS
+        # below; rounding to a whole number would hide real jitter (prompt.md
+        # section 33/34: report real measured behavior).
+        self._value_labels["stream_fps"].setText(f"{sample.stream_fps:.1f}")
         self._value_labels["dropped"].setText(str(sample.dropped_frames))
         self._value_labels["decode"].setText(f"{sample.decode_latency_ms:.1f} ms")
         self._value_labels["bitrate"].setText(_format_bitrate(sample.bitrate_bps))
@@ -104,14 +111,46 @@ class StatusPanel(BasePanel):
             self._value_labels["codec"].setText(sample.codec.upper() + suffix)
 
     def set_render_fps(self, fps: float) -> None:
-        self._value_labels["render_fps"].setText(f"{fps:.0f}")
+        self._value_labels["render_fps"].setText(f"{fps:.1f}")
+
+    def set_performance_quality(self, value: int) -> None:
+        """The Device panel's Performance<->Quality slider position (0 =
+        full Performance, 100 = full Quality) -- a current setting, not a
+        stream measurement, so unlike the rows below it's always shown
+        (even before Cast is ever turned on) and reset_stream_stats() never
+        blanks it back to "--" when casting stops."""
+        self._value_labels["performance_quality"].setText(f"{value}%")
+
+    def set_target_fps(self, fps: int) -> None:
+        """The FPS actually requested from the encoder for the current cast
+        session (resolve_streaming_profile()'s resolved max_fps, already
+        capped at MAX_STREAM_FPS) -- a target, not a measurement, so it's
+        shown as a plain integer rather than alongside the measured FPS
+        rows' decimal precision."""
+        self._value_labels["target_fps"].setText(str(fps))
+
+    def set_display_refresh(self, hz: int | None) -> None:
+        """The connected Android device's own real detected display refresh
+        rate (device/display_info.py) -- may exceed Target FPS (e.g. a
+        240Hz panel still targets 165)."""
+        self._value_labels["display_refresh"].setText(f"{hz} Hz" if hz else "—")
 
     def set_system_stats(self, cpu_percent: float, ram_mb: float) -> None:
         self._value_labels["cpu"].setText(f"{cpu_percent:.0f}%")
         self._value_labels["ram"].setText(f"{ram_mb:.0f} MB")
 
     def reset_stream_stats(self) -> None:
-        for key in ("stream_fps", "render_fps", "dropped", "decode", "bitrate", "resolution", "codec"):
+        for key in (
+            "display_refresh",
+            "target_fps",
+            "stream_fps",
+            "render_fps",
+            "dropped",
+            "decode",
+            "bitrate",
+            "resolution",
+            "codec",
+        ):
             self._value_labels[key].setText("—")
 
     def _build_recording_controls(self) -> QWidget:

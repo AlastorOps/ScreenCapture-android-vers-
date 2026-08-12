@@ -1,6 +1,6 @@
-"""The Performance/Quality slider snaps into discrete steps as it's dragged
-(both the main window's LabeledSlider and the Settings dialog's plain
-QSlider copy), rather than landing on an arbitrary pixel-derived value.
+"""The Performance/Quality slider (Device panel's LabeledSlider -- the only
+copy of this control in the app) snaps into discrete steps as it's dragged,
+rather than landing on an arbitrary pixel-derived value.
 """
 
 import os
@@ -8,10 +8,8 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from androidlink.device.manager import DeviceManager
-from androidlink.settings.manager import SettingsManager
+from androidlink.ui.panels.device_panel import DevicePanel
 from androidlink.ui.widgets.slider_labeled import LabeledSlider, snap_value
-
-from tests.conftest import build_settings_dialog
 
 
 def test_snap_value_rounds_to_nearest_multiple():
@@ -55,13 +53,12 @@ def test_labeled_slider_normalizes_a_non_multiple_initial_value(qtbot):
     assert slider.value() == 50
 
 
-def test_settings_dialog_streaming_slider_snaps(qtbot, tmp_path):
-    settings_manager = SettingsManager(tmp_path / "config.json")
-    settings_manager.load()
+def test_device_panel_performance_slider_snaps(qtbot):
     device_manager = DeviceManager()
+    panel = DevicePanel(device_manager)
+    qtbot.addWidget(panel)
 
-    dialog = build_settings_dialog(qtbot, settings_manager, device_manager)
+    panel.performance_slider.setValue(37)
 
-    dialog._perf_slider.setValue(37)
-    assert dialog._perf_slider.value() == 40
-    assert dialog._perf_value_label.text() == "40"
+    assert panel.performance_slider.value() == 40
+    assert panel._performance_readout_label.text() == "40%"

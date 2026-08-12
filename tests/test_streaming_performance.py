@@ -54,6 +54,24 @@ def test_fps_override_takes_priority_over_automatic_fps():
     assert profile.max_fps == 90
 
 
+def test_automatic_fps_is_capped_at_165_even_for_a_240hz_panel():
+    # FPS Limit Update: removing the old blanket 60fps cap must never turn
+    # into requesting an arbitrarily high rate from a 240Hz-class panel --
+    # 165 is the new hard ceiling regardless of source.
+    profile = resolve_streaming_profile(50, automatic_fps=240)
+    assert profile.max_fps == 165
+
+
+def test_manual_fps_override_is_also_capped_at_165():
+    profile = resolve_streaming_profile(50, max_fps_override=240, automatic_fps=60)
+    assert profile.max_fps == 165
+
+
+def test_165_fps_itself_passes_through_uncapped():
+    profile = resolve_streaming_profile(50, automatic_fps=165)
+    assert profile.max_fps == 165
+
+
 def test_fps_is_independent_of_resolution_and_bitrate_slider_position():
     # FPS isn't traded off along the slider the way resolution/bitrate are --
     # Automatic targets the same detected device rate at every slider

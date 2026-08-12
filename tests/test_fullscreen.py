@@ -68,7 +68,7 @@ def test_entering_fullscreen_hides_side_panels_and_chrome(qtbot, tmp_path):
     assert window._is_fullscreen is True
     assert window._device_panel.isVisible() is False
     assert window._status_panel.isVisible() is False
-    assert window._performance_slider.isVisible() is False
+    assert window._device_panel.performance_slider.isVisible() is False
     assert window.menuBar().isVisible() is False
     assert window.statusBar().isVisible() is False
 
@@ -82,7 +82,7 @@ def test_exiting_fullscreen_restores_everything(qtbot, tmp_path):
     assert window._is_fullscreen is False
     assert window._device_panel.isVisible() is True
     assert window._status_panel.isVisible() is True
-    assert window._performance_slider.isVisible() is True
+    assert window._device_panel.performance_slider.isVisible() is True
     assert window.menuBar().isVisible() is True
     assert window.statusBar().isVisible() is True
 

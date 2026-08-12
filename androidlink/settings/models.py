@@ -32,7 +32,7 @@ class StreamingSettings(BaseModel):
 
     performance_slider_value: int = 50
     resolution_override: int | None = None  # max_size in pixels; None = automatic
-    fps_override: int | None = None  # None = automatic (60)
+    fps_override: int | None = None  # None = automatic (device's detected refresh rate, capped at 165)
     bitrate_override_mbps: float | None = None  # None = automatic
 
 

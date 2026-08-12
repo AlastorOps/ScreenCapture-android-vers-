@@ -36,6 +36,25 @@ STANDARD_RATES_HZ = (24, 25, 30, 48, 50, 60, 90, 120, 144, 165, 240)
 
 FALLBACK_HZ = 60  # used only when detection genuinely fails -- see performance.py
 
+# Absolute ceiling on what the app will ever request from the encoder or
+# offer as a manual target (FPS Limit Update spec), independent of how high
+# a connected panel's real refresh rate goes -- e.g. a 240Hz panel still
+# gets capped at 165, never streamed at its full native rate. The one place
+# this is actually enforced is resolve_streaming_profile() in
+# streaming/performance.py; STANDARD_RATES_HZ above still includes 240 so a
+# genuinely 240Hz-capable screen is *reported* honestly (e.g. in the Device
+# panel's capability readout) even though streaming never targets above
+# MAX_STREAM_FPS.
+MAX_STREAM_FPS = 165
+
+# The fixed set of "target mode" tiers offered for manual FPS selection
+# (Settings > Streaming > Advanced), each <= MAX_STREAM_FPS. The dropdown
+# further filters this down to whatever the connected device's screen
+# actually reports supporting (ui/windows/settings_dialog.py's
+# _build_fps_options()); this tuple is also what Automatic mode's
+# instability fallback steps down through (streaming/fps_stability.py).
+SUPPORTED_TARGET_FPS_HZ = (30, 60, 90, 120, 144, 165)
+
 
 def _round_to_standard(value: float) -> int:
     return min(STANDARD_RATES_HZ, key=lambda rate: abs(rate - value))

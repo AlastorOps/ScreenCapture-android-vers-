@@ -3,23 +3,20 @@ import logging
 
 from PySide6.QtCore import QByteArray, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QDockWidget, QLabel, QMainWindow, QPushButton, QToolBar, QWidget
+from PySide6.QtWidgets import QDockWidget, QLabel, QMainWindow, QWidget
 
 from androidlink.audio.mic_controller import MicController
 from androidlink.camera.camera_controller import CameraController
 from androidlink.device.device_model import AndroidDevice
-from androidlink.device.display_info import FALLBACK_HZ
 from androidlink.device.manager import DeviceManager
 from androidlink.recording.recording_controller import RecordingController
 from androidlink.settings.manager import SettingsManager
 from androidlink.setup.wizard import SetupWizardDialog
 from androidlink.streaming.controller import CastingController
-from androidlink.streaming.performance import describe_resolution, resolve_streaming_profile
 from androidlink.ui.panels.device_panel import DevicePanel
 from androidlink.ui.panels.screen_panel import ScreenPanel
 from androidlink.ui.panels.status_panel import StatusPanel
 from androidlink.ui.themes.theme_manager import ThemeManager
-from androidlink.ui.widgets.slider_labeled import LabeledSlider
 from androidlink.ui.widgets.status_dot import StatusDot, StatusState
 from androidlink.ui.windows.settings_dialog import SettingsDialog
 from androidlink.utils.platform import get_logs_dir, open_path_in_explorer
@@ -49,7 +46,6 @@ class MainWindow(QMainWindow):
         self.setDockNestingEnabled(True)
 
         self._build_docks()
-        self._build_performance_toolbar()
         self._build_menu()
         self._build_status_bar()
         self._restore_saved_layout_or_default()
@@ -137,7 +133,21 @@ class MainWindow(QMainWindow):
 
         self._casting_controller.stats_updated.connect(status_panel.set_stream_stats)
         self._casting_controller.cast_session_stopped.connect(status_panel.reset_stream_stats)
+        self._casting_controller.cast_session_started.connect(self._on_cast_session_started_diagnostics)
         screen_panel.render_fps_updated.connect(status_panel.set_render_fps)
+
+        # Performance/Quality slider (Device panel, under Microphone -- the
+        # only copy of this control in the app). Drag ticks only update
+        # CastingController's in-memory position and the Diagnostics
+        # readout; commit (slider release) is what actually applies it,
+        # restarting an already-active cast session if there is one -- see
+        # CastingController.commit_slider_value()'s docstring for the full
+        # trace from this signal down to the scrcpy-server launch args.
+        initial_slider_value = self._settings_manager.settings.streaming.performance_slider_value
+        device_panel.set_initial_performance_slider_value(initial_slider_value)
+        device_panel.performance_slider_changed.connect(self._on_performance_slider_changed)
+        device_panel.performance_slider_committed.connect(self._casting_controller.commit_slider_value)
+        status_panel.set_performance_quality(initial_slider_value)
 
         self._system_stats_sampler = SystemStatsSampler(parent=self)
         self._system_stats_sampler.sample_ready.connect(status_panel.set_system_stats)
@@ -185,82 +195,31 @@ class MainWindow(QMainWindow):
             "ascii"
         )
 
-    def _build_performance_toolbar(self) -> None:
-        performance_slider = LabeledSlider("PERFORMANCE", "QUALITY", value=50, snap_interval=10)
-        performance_slider.setToolTip(
-            "Resolution/bitrate target for the next cast -- drag, then click"
-            " ↻ Refresh to apply immediately to an already-active session"
-        )
-        performance_slider.setValue(self._settings_manager.settings.streaming.performance_slider_value)
-        performance_slider.valueChanged.connect(self._casting_controller.set_slider_value)
-        performance_slider.committed.connect(self._casting_controller.save_slider_value)
-        self._performance_slider = performance_slider
+    def _on_performance_slider_changed(self, value: int) -> None:
+        """Every drag tick (Device panel's Performance/Quality slider):
+        updates CastingController's in-memory position (used the next time
+        a session starts or is restarted, see _start_casting() in
+        streaming/controller.py) and the Diagnostics readout. Never
+        restarts an active session by itself -- that would fire on every
+        tick; see device_panel.performance_slider_committed /
+        CastingController.commit_slider_value() for the actual apply-on-
+        release path."""
+        self._casting_controller.set_slider_value(value)
+        self._status_panel.set_performance_quality(value)
 
-        # Live resolution readout (prompt.md section 6/17) so the slider
-        # isn't an opaque 0-100 number -- reflects the real profile
-        # resolve_streaming_profile() would use for the *next* cast start,
-        # including any Settings > Streaming > Advanced overrides.
-        self._resolution_label = QLabel()
-        self._resolution_label.setProperty("role", "mono")
-        self._resolution_label.setContentsMargins(12, 0, 12, 0)
-        self._resolution_label.setToolTip(
-            "Approximate resolution cap for the next time casting starts -- "
-            "the exact output depends on the connected device's real aspect ratio"
-        )
-        self._update_resolution_label(performance_slider.value())
-        performance_slider.valueChanged.connect(self._update_resolution_label)
-        # Refresh-rate detection (device/display_info.py) completes
-        # asynchronously after connect -- without this the "@ N fps" readout
-        # would keep showing the FALLBACK_HZ guess until the user happened
-        # to touch the slider again after detection finished.
-        self._device_manager.devices_changed.connect(
-            lambda _devices: self._update_resolution_label(self._performance_slider.value())
-        )
-
-        # Dragging the slider alone never restarts an active session (that
-        # would restart on every drag tick, which would be far more
-        # disruptive than useful) -- this button lets the user apply the
-        # new position on demand instead of having to toggle Cast off and
-        # back on. Only meaningful while actually casting.
-        self._refresh_resolution_button = QPushButton("↻ Refresh")
-        self._refresh_resolution_button.setToolTip(
-            "Apply the current Performance/Quality position to the active cast "
-            "session now, instead of waiting for the next time Cast is turned on"
-        )
-        self._refresh_resolution_button.setEnabled(self._casting_controller.is_casting)
-        self._refresh_resolution_button.clicked.connect(self._casting_controller.restart_if_casting)
-        self._casting_controller.cast_session_started.connect(
-            lambda *_args: self._refresh_resolution_button.setEnabled(True)
-        )
-        self._casting_controller.cast_session_stopped.connect(
-            lambda: self._refresh_resolution_button.setEnabled(False)
-        )
-
-        # A plain QToolBar pinned to the bottom -- not a QDockWidget -- so it
-        # stays fixed and full-width regardless of how the panels above it
-        # are rearranged (prompt.md section 16/17: the slider bar is not one
-        # of the customizable panels).
-        toolbar = QToolBar("Performance", self)
-        toolbar.setObjectName("performance_toolbar")
-        toolbar.setMovable(False)
-        toolbar.setFloatable(False)
-        toolbar.addWidget(performance_slider)
-        toolbar.addWidget(self._resolution_label)
-        toolbar.addWidget(self._refresh_resolution_button)
-        self.addToolBar(Qt.ToolBarArea.BottomToolBarArea, toolbar)
-        self._performance_toolbar = toolbar
-
-    def _update_resolution_label(self, slider_value: int) -> None:
-        streaming = self._settings_manager.settings.streaming
+    def _on_cast_session_started_diagnostics(
+        self, _width: int, _height: int, fps: int, _audio_enabled: bool
+    ) -> None:
+        """Feeds the Status panel's Display Refresh / Target FPS rows
+        (prompt.md section 20/diagnostics) once a cast session actually
+        starts -- fps here is CastingController's resolved, already-capped
+        target; display refresh is the device's own real detected rate,
+        read directly off the active device rather than threaded through
+        the signal (avoids widening cast_session_started's signature, which
+        recording_controller.py and tests also depend on)."""
         device = self._device_manager.active_device
-        profile = resolve_streaming_profile(
-            slider_value,
-            max_size_override=streaming.resolution_override,
-            max_fps_override=streaming.fps_override,
-            bitrate_override_mbps=streaming.bitrate_override_mbps,
-            automatic_fps=(device.refresh_rate_hz if device else None) or FALLBACK_HZ,
-        )
-        self._resolution_label.setText(f"{describe_resolution(profile.max_size)} @ {profile.max_fps} fps")
+        self._status_panel.set_target_fps(fps)
+        self._status_panel.set_display_refresh(device.refresh_rate_hz if device else None)
 
     def _build_status_bar(self) -> None:
         status_bar = self.statusBar()
@@ -328,7 +287,6 @@ class MainWindow(QMainWindow):
             self._status_dock.setVisible(self._status_dock_was_visible)
             self._screen_dock.setTitleBarWidget(None)
 
-        self._performance_toolbar.setVisible(not checked)
         self.menuBar().setVisible(not checked)
         self.statusBar().setVisible(not checked)
 
@@ -361,15 +319,10 @@ class MainWindow(QMainWindow):
             casting_controller=self._casting_controller,
             mic_controller=self._mic_controller,
             on_accent_changed=self._theme_manager.apply_theme,
-            on_performance_default_changed=self._performance_slider.setValue,
             on_theme_mode_changed=self._theme_manager.set_theme,
             parent=self,
         )
         dialog.exec()
-        # Streaming > Advanced overrides (resolution/FPS/bitrate) may have
-        # changed while the dialog was open even without moving the slider
-        # itself -- refresh the readout so it never shows a stale value.
-        self._update_resolution_label(self._performance_slider.value())
 
     def _open_logs(self) -> None:
         open_path_in_explorer(get_logs_dir())

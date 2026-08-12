@@ -20,9 +20,12 @@ from androidlink.streaming.protocol import (
     AUDIO_SOURCE_MIC_VOICE_RECOGNITION,
 )
 from androidlink.ui.panels.base_panel import BasePanel
+from androidlink.ui.widgets.slider_labeled import LabeledSlider
 from androidlink.ui.widgets.status_dot import StatusDot, StatusState
 from androidlink.ui.widgets.toggle_switch import ToggleSwitch
 from androidlink.utils import errors
+
+_PERFORMANCE_SLIDER_SNAP = 10
 
 _FEATURES = ["Cast", "Control", "Audio", "Camera", "Mic"]
 _CAST_DEPENDENT_FEATURES = ("Control", "Audio")
@@ -48,6 +51,19 @@ def _device_detail_text(device: AndroidDevice) -> str:
     if device.connection_state == ConnectionState.DEVICE:
         return f"Android {device.android_version}" if device.android_version else "USB Connected"
     return device.connection_state.value.upper()
+
+
+def _device_list_signature(devices: list[AndroidDevice]) -> tuple:
+    """Everything _build_device_row() actually renders for each device, in
+    list order. Two calls with equal signatures would produce visually
+    identical rows -- used to skip rebuilding the device list for a
+    devices_changed emission that doesn't actually change what's on
+    screen (e.g. a field like refresh_rate_hz updating, which isn't shown
+    in the list at all)."""
+    return tuple(
+        (device.serial, device.connection_state, device.is_active, device.display_name, _device_detail_text(device))
+        for device in devices
+    )
 
 
 class DevicePanel(BasePanel):
@@ -80,10 +96,34 @@ class DevicePanel(BasePanel):
     mic_volume_changed = Signal(int)  # 0-100
     mic_volume_committed = Signal(int)  # fires once on slider release, for persistence
     mic_mute_toggled = Signal(bool)
+    performance_slider_changed = Signal(int)  # 0-100, every drag tick
+    performance_slider_committed = Signal()  # fires once on slider release, applies live
 
     def __init__(self, device_manager: DeviceManager, parent: QWidget | None = None) -> None:
         super().__init__("Device", parent)
         self._device_manager = device_manager
+        # Last rendered snapshot of the device list (see _device_list_signature()
+        # below) -- devices_changed can legitimately fire more than once for
+        # the same visible state (e.g. getprop/dumpsys metadata landing
+        # asynchronously right after connect touches fields the list rows
+        # don't even display), so the list is only actually torn down and
+        # rebuilt when what it would show has really changed. None means
+        # "never rendered yet" -- distinct from an empty tuple ("rendered,
+        # currently zero devices"), so the very first render always runs.
+        self._last_device_list_signature: tuple | None = None
+
+        header_row = QWidget()
+        header_layout = QHBoxLayout(header_row)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.addStretch(1)
+        self._refresh_button = QPushButton("⟳ Refresh")
+        self._refresh_button.setToolTip(
+            "Scan ADB for connected devices right now, instead of waiting for "
+            "the next automatic check"
+        )
+        self._refresh_button.clicked.connect(self._device_manager.refresh_now)
+        header_layout.addWidget(self._refresh_button)
+        self.content_layout.addWidget(header_row)
 
         self._adb_status_label = QLabel()
         self._adb_status_label.setProperty("role", "placeholder")
@@ -159,6 +199,7 @@ class DevicePanel(BasePanel):
             elif feature == "Mic":
                 self.content_layout.addWidget(self._build_mic_controls())
 
+        self.content_layout.addWidget(self._build_performance_controls())
         self.content_layout.addStretch(1)
 
         device_manager.adb_available_changed.connect(self._on_adb_available_changed)
@@ -328,6 +369,62 @@ class DevicePanel(BasePanel):
 
         return container
 
+    def _build_performance_controls(self) -> QWidget:
+        """The Performance <-> Quality slider (prompt.md section 6), living
+        directly under Microphone rather than as a separate main-window
+        toolbar -- there is exactly one of these in the whole app now. Drag
+        ticks (performance_slider_changed) update the live "% + resolved
+        profile" preview only; the actual streaming pipeline only picks up
+        a new position on release (performance_slider_committed), which
+        CastingController.commit_slider_value() applies immediately to an
+        already-active cast session by restarting it -- see that method's
+        docstring for why dragging alone must never trigger a restart.
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(4)
+
+        title = QLabel("PERFORMANCE / QUALITY")
+        title.setProperty("role", "muted")
+        layout.addWidget(title)
+
+        self.performance_slider = LabeledSlider(
+            "Performance", "Quality", value=50, snap_interval=_PERFORMANCE_SLIDER_SNAP
+        )
+        self.performance_slider.setToolTip(
+            "Performance: lower resolution/bitrate, easiest to sustain the "
+            "highest FPS. Quality: higher resolution/bitrate, still targets "
+            "the highest FPS the connection can actually sustain. Applies "
+            "immediately to an active cast session -- the Android device "
+            "stays connected the whole time."
+        )
+        self.performance_slider.valueChanged.connect(self._on_performance_slider_value_changed)
+        self.performance_slider.committed.connect(self.performance_slider_committed)
+        layout.addWidget(self.performance_slider)
+
+        self._performance_readout_label = QLabel()
+        self._performance_readout_label.setProperty("role", "mono")
+        self._performance_readout_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._performance_readout_label)
+
+        self._update_performance_readout(self.performance_slider.value())
+
+        return container
+
+    def _on_performance_slider_value_changed(self, value: int) -> None:
+        self._update_performance_readout(value)
+        self.performance_slider_changed.emit(value)
+
+    def _update_performance_readout(self, value: int) -> None:
+        self._performance_readout_label.setText(f"{value}%")
+
+    def set_initial_performance_slider_value(self, value: int) -> None:
+        self.performance_slider.blockSignals(True)
+        self.performance_slider.setValue(value)
+        self.performance_slider.blockSignals(False)
+        self._update_performance_readout(self.performance_slider.value())
+
     def _build_device_row(self, device: AndroidDevice) -> QWidget:
         row = QWidget()
         layout = QVBoxLayout(row)
@@ -394,10 +491,24 @@ class DevicePanel(BasePanel):
         # Refresh-rate detection (device/display_info.py) completes
         # asynchronously after connect and re-emits devices_changed once it
         # does -- refresh the active device's info panel so "detecting…"
-        # doesn't linger after the real value is already known.
+        # doesn't linger after the real value is already known. Cheap and
+        # idempotent (just re-sets label text/enabled flags), so this always
+        # runs regardless of the signature check below.
         active = next((d for d in devices if d.is_active), None)
         if active is not None:
             self._on_active_device_changed(active)
+
+        # The expensive, visually-disruptive part -- tearing down and
+        # rebuilding every device row -- only happens when the list would
+        # actually look different (prompt.md: "old list == new list -> do
+        # nothing"). Without this, e.g. getprop/dumpsys metadata landing a
+        # few seconds after connect (fields the rows below don't even show)
+        # rebuilt the whole list anyway, which is what made the panel look
+        # like it was "randomly refreshing" on its own.
+        signature = _device_list_signature(devices)
+        if signature == self._last_device_list_signature:
+            return
+        self._last_device_list_signature = signature
 
         self._clear_device_list()
 

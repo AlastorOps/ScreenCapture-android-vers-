@@ -14,11 +14,9 @@ from androidlink.settings.manager import SettingsManager
 from tests.conftest import build_settings_dialog
 
 
-def _build_dialog(qtbot, tmp_path, *, accent_calls=None, perf_calls=None):
+def _build_dialog(qtbot, tmp_path, *, accent_calls=None):
     if accent_calls is None:
         accent_calls = []
-    if perf_calls is None:
-        perf_calls = []
 
     settings_manager = SettingsManager(tmp_path / "config.json")
     settings_manager.load()
@@ -29,7 +27,6 @@ def _build_dialog(qtbot, tmp_path, *, accent_calls=None, perf_calls=None):
         settings_manager,
         device_manager,
         on_accent_changed=accent_calls.append,
-        on_performance_default_changed=perf_calls.append,
     )
     return settings_manager, dialog
 
@@ -101,16 +98,13 @@ def test_streaming_resolution_override_saves_immediately(qtbot, tmp_path):
     assert reloaded.streaming.resolution_override == 1920
 
 
-def test_performance_default_slider_commits_on_release_and_calls_back(qtbot, tmp_path):
-    perf_calls = []
-    settings_manager, dialog = _build_dialog(qtbot, tmp_path, perf_calls=perf_calls)
+def test_streaming_tab_no_longer_has_its_own_performance_slider(qtbot, tmp_path):
+    # There is exactly one Performance/Quality slider in the whole app now
+    # (Device panel, under Microphone) -- the Settings dialog's old copy of
+    # it was removed rather than left as a second, easy-to-desync control.
+    _settings_manager, dialog = _build_dialog(qtbot, tmp_path)
 
-    dialog._perf_slider.setValue(80)
-    assert settings_manager.settings.streaming.performance_slider_value == 50  # not yet committed
-
-    dialog._perf_slider.sliderReleased.emit()
-    assert settings_manager.settings.streaming.performance_slider_value == 80
-    assert perf_calls == [80]
+    assert not hasattr(dialog, "_perf_slider")
 
 
 def test_recording_quality_change_saves(qtbot, tmp_path):

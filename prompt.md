@@ -201,10 +201,11 @@ Performance is a major priority.
 
 Target:
 
-* 60 FPS where supported
-* 1080p/60
-* 1440p/60 where supported
-* Higher resolution/FPS when the device genuinely supports it
+* Automatic mode: the highest stable FPS up to a hard ceiling of **165 FPS**, matching the Android device's own detected refresh rate (never artificially capped at 60 for a more capable device, and never requested above 165 even for a 240Hz-class panel)
+* 1080p/60 and 1440p/60 at minimum where supported
+* Higher resolution/FPS when the device genuinely supports it, subject to the 165 FPS ceiling
+
+Supported manual FPS target modes: 30 / 60 / 90 / 120 / 144 / 165. The application must never request or target anything above 165 FPS, regardless of what the connected device's panel is capable of.
 
 The application should automatically detect:
 
@@ -214,11 +215,12 @@ The application should automatically detect:
 * Codec support
 * USB transport performance
 * PC decoding capabilities
+* Windows monitor refresh rate, where possible (informational -- does not itself lower the FPS target, since requesting more frames than the monitor can display costs a little extra encode/decode work but never adds latency or duplicates frames)
 * GPU capabilities
 
 Then select the highest practical configuration.
 
-Do not blindly request the highest possible resolution if it causes instability.
+Do not blindly request the highest possible resolution if it causes instability. The same applies to FPS: if 165 FPS proves unstable, dynamically fall back to the next lower standard tier (e.g. 144) rather than forcing 165 or collapsing straight to 60.
 
 Prioritize:
 
@@ -280,6 +282,10 @@ Prioritize:
 * image quality
 
 The user should not need to manually configure complicated codec parameters unless they open an Advanced Settings section.
+
+The slider must actually reach the streaming pipeline, not just its own displayed position/label. Concretely it drives resolution and bitrate (the two real levers a fixed-protocol encoder session exposes -- see streaming/performance.py's resolve_streaming_profile()); FPS stays targeted at the highest practical rate at every position (capped at the FPS ceiling in section 5), since a lighter Performance-end frame budget is what actually makes a high FPS easier to sustain, not a lower FPS target. Releasing the slider applies the new position immediately to an already-active cast session by restarting the streaming session -- the Android device itself stays connected throughout; only the next time Cast is turned on is not an acceptable place for a change to first take effect.
+
+There is exactly one copy of this slider in the app (Device panel, directly under Microphone -- see section 17).
 
 ---
 
@@ -655,12 +661,12 @@ Use a structure similar to:
 │               │                          │           │
 │ DEVICE        │                          │ STATUS    │
 │               │                          │           │
-│ Galaxy S24    │                          │ FPS 60    │
-│ Android 15    │      ANDROID SCREEN      │ Latency   │
-│               │                          │ 18 ms     │
-│ [Disconnect]  │                          │           │
-│               │                          │           │
-│ FEATURES      │                          │           │
+│ Galaxy S24    │                          │ Target FPS│
+│ Android 15    │      ANDROID SCREEN      │ 120       │
+│               │                          │ Stream FPS│
+│ [Disconnect]  │                          │ 118.4     │
+│               │                          │ Latency   │
+│ FEATURES      │                          │ 18 ms     │
 │               │                          │           │
 │ Cast     ●    │                          │           │
 │ Control  ●    │                          │           │
@@ -668,12 +674,19 @@ Use a structure similar to:
 │ Camera   ○    │                          │           │
 │ Mic      ○    │                          │           │
 │               │                          │           │
-├───────────────┴──────────────────────────┴───────────┤
-│ Performance ◄────────────●──────────► Quality        │
-└──────────────────────────────────────────────────────┘
+│ PERFORMANCE / │                          │           │
+│ QUALITY       │                          │           │
+│ Perf ●── Qual │                          │           │
+│      70%      │                          │           │
+└───────────────┴──────────────────────────┴───────────┘
 ```
 
-This is only a conceptual layout. The actual UI should be visually polished.
+The Performance/Quality slider lives in the Device panel, directly under
+Microphone -- there is exactly one copy of it in the app. It applies
+immediately to an already-active cast session (by restarting the streaming
+session, not by disconnecting the Android device), never just its own
+displayed label. This is only a conceptual layout; the actual UI should be
+visually polished.
 
 ---
 
@@ -771,17 +784,21 @@ Example:
 ```text
 PERFORMANCE
 
-Render FPS       59.8
-Stream FPS       60.0
-Dropped Frames   3
+Display Refresh  165 Hz
+Target FPS       165
+Render FPS       164.2
+Stream FPS       164.7
+Dropped Frames   0
 Resolution       2560 × 1440
-Bitrate          24.5 Mbps
+Bitrate          35 Mbps
 Codec            H.264
 Decode           Hardware
 Latency          ~18 ms
 CPU              12%
 GPU              18%
 ```
+
+Target FPS is what's actually requested from the encoder (never shown as if it were a measurement); Display Refresh, Render FPS, Stream FPS, Dropped Frames, Resolution, Bitrate, and Codec are all genuinely measured values, never fabricated.
 
 ---
 

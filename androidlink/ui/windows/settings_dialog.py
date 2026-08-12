@@ -42,11 +42,10 @@ from PySide6.QtWidgets import (
 
 from androidlink.audio.mic_controller import MicController
 from androidlink.audio.virtual_audio import is_likely_virtual_cable
-from androidlink.device.display_info import FALLBACK_HZ
+from androidlink.device.display_info import FALLBACK_HZ, MAX_STREAM_FPS
 from androidlink.device.manager import DeviceManager
 from androidlink.settings.manager import SettingsManager
 from androidlink.streaming.controller import CastingController
-from androidlink.streaming.performance import describe_resolution, resolve_streaming_profile
 from androidlink.streaming.protocol import (
     AUDIO_SOURCE_MIC,
     AUDIO_SOURCE_MIC_CAMCORDER,
@@ -55,7 +54,6 @@ from androidlink.streaming.protocol import (
     AUDIO_SOURCE_MIC_VOICE_RECOGNITION,
 )
 from androidlink.ui.themes import palette
-from androidlink.ui.widgets.slider_labeled import snap_value
 from androidlink.ui.widgets.toggle_switch import ToggleSwitch
 from androidlink.utils.logging import resolve_log_level, set_log_level
 from androidlink.utils.platform import get_logs_dir, get_recordings_dir, open_path_in_explorer
@@ -63,7 +61,6 @@ from androidlink.utils.platform import get_logs_dir, get_recordings_dir, open_pa
 logger = logging.getLogger(__name__)
 
 _AUTOMATIC = "Automatic"
-_PERFORMANCE_SLIDER_SNAP = 10  # matches the main window's LabeledSlider snap_interval
 
 # Mirrors device_panel.py's mic source labels -- duplicated rather than
 # imported since that dict is a panel-local display detail, not part of a
@@ -99,7 +96,6 @@ class SettingsDialog(QDialog):
         casting_controller: CastingController,
         mic_controller: MicController,
         on_accent_changed: Callable[[str], None],
-        on_performance_default_changed: Callable[[int], None],
         on_theme_mode_changed: Callable[[str], None] = lambda _mode: None,
         parent: QWidget | None = None,
     ) -> None:
@@ -114,7 +110,6 @@ class SettingsDialog(QDialog):
         self._mic_controller = mic_controller
         self._on_accent_changed = on_accent_changed
         self._on_theme_mode_changed = on_theme_mode_changed
-        self._on_performance_default_changed = on_performance_default_changed
         self._original_accent = settings_manager.settings.general.accent_color
         self._pending_accent = self._original_accent
         self._original_theme = settings_manager.settings.general.theme
@@ -191,39 +186,14 @@ class SettingsDialog(QDialog):
         layout = QFormLayout(widget)
         streaming = self._settings_manager.settings.streaming
 
-        slider_row = QWidget()
-        slider_layout = QHBoxLayout(slider_row)
-        slider_layout.setContentsMargins(0, 0, 0, 0)
-        self._perf_slider = QSlider(Qt.Orientation.Horizontal)
-        self._perf_slider.setRange(0, 100)
-        self._perf_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self._perf_slider.setTickInterval(_PERFORMANCE_SLIDER_SNAP)
-        self._perf_slider.setSingleStep(_PERFORMANCE_SLIDER_SNAP)
-        self._perf_slider.setPageStep(_PERFORMANCE_SLIDER_SNAP)
-        self._perf_slider.setValue(
-            snap_value(streaming.performance_slider_value, 0, 100, _PERFORMANCE_SLIDER_SNAP)
+        performance_slider_info = QLabel(
+            "Performance ↔ Quality is set from the Device panel, directly under "
+            "Microphone -- there's only one copy of that control. Changes there apply "
+            "immediately to an active cast session."
         )
-        self._perf_slider.setToolTip("Restarts casting immediately if it's currently active")
-        self._perf_value_label = QLabel(str(self._perf_slider.value()))
-        self._perf_value_label.setProperty("role", "mono")
-        # A single handler (rather than one connection per dependent widget)
-        # so the snap-and-re-emit below settles on the final value before
-        # anything downstream (the value label, the resolution readout)
-        # reacts -- otherwise they'd briefly show the pre-snap value.
-        self._perf_slider.valueChanged.connect(self._on_perf_slider_value_changed)
-        self._perf_slider.sliderReleased.connect(self._on_performance_default_committed)
-        slider_layout.addWidget(self._perf_slider, stretch=1)
-        slider_layout.addWidget(self._perf_value_label)
-        layout.addRow("Performance ↔ Quality", slider_row)
-
-        self._streaming_resolution_label = QLabel()
-        self._streaming_resolution_label.setProperty("role", "muted")
-        self._streaming_resolution_label.setToolTip(
-            "Approximate resolution cap -- the exact output depends on the "
-            "connected device's real aspect ratio"
-        )
-        self._update_streaming_resolution_label(self._perf_slider.value())
-        layout.addRow("", self._streaming_resolution_label)
+        performance_slider_info.setProperty("role", "muted")
+        performance_slider_info.setWordWrap(True)
+        layout.addRow("Performance ↔ Quality", performance_slider_info)
 
         advanced_group = QGroupBox("Advanced")
         advanced_group.setToolTip(
@@ -287,64 +257,36 @@ class SettingsDialog(QDialog):
 
     def _automatic_fps(self) -> int:
         device = self._device_manager.active_device
-        return (device.refresh_rate_hz if device else None) or FALLBACK_HZ
+        hz = (device.refresh_rate_hz if device else None) or FALLBACK_HZ
+        return min(hz, MAX_STREAM_FPS)
 
     def _build_fps_options(self) -> list[tuple[str, int | None]]:
         """Only offers rates the connected device's screen actually reports
         supporting (prompt.md: "only display/select modes that are
         realistically supported") -- device/display_info.py's detection,
-        not a fixed 30/60 cap. Automatic is always present and targets the
-        device's own current refresh rate rather than a hardcoded number."""
+        not a fixed 30/60 cap -- further filtered to MAX_STREAM_FPS (165):
+        the app never requests above that, so a device panel capable of e.g.
+        240Hz simply won't offer 240 as a manual choice. Automatic is always
+        present and targets the device's own current refresh rate (also
+        capped) rather than a hardcoded number."""
         device = self._device_manager.active_device
         if device is not None and device.supported_refresh_rates_hz:
+            offerable_rates = [hz for hz in device.supported_refresh_rates_hz if hz <= MAX_STREAM_FPS]
             options: list[tuple[str, int | None]] = [
-                (f"{_AUTOMATIC} ({device.refresh_rate_hz} Hz -- matches the device's screen)", None)
+                (f"{_AUTOMATIC} ({self._automatic_fps()} Hz -- matches the device's screen)", None)
             ]
-            options += [(f"{hz} Hz", hz) for hz in device.supported_refresh_rates_hz]
+            options += [(f"{hz} Hz", hz) for hz in offerable_rates]
             return options
         return [(f"{_AUTOMATIC} ({FALLBACK_HZ} Hz -- no device connected to detect a real rate)", None)]
-
-    def _on_perf_slider_value_changed(self, value: int) -> None:
-        snapped = snap_value(value, 0, 100, _PERFORMANCE_SLIDER_SNAP)
-        if snapped != value:
-            self._perf_slider.setValue(snapped)  # re-enters this handler with the snapped value
-            return
-        self._perf_value_label.setText(str(value))
-        self._update_streaming_resolution_label(value)
-
-    def _update_streaming_resolution_label(self, slider_value: int) -> None:
-        streaming = self._settings_manager.settings.streaming
-        profile = resolve_streaming_profile(
-            slider_value,
-            max_size_override=streaming.resolution_override,
-            max_fps_override=streaming.fps_override,
-            bitrate_override_mbps=streaming.bitrate_override_mbps,
-            automatic_fps=self._automatic_fps(),
-        )
-        self._streaming_resolution_label.setText(
-            f"{describe_resolution(profile.max_size)} @ {profile.max_fps} fps"
-        )
-
-    def _on_performance_default_committed(self) -> None:
-        value = self._perf_slider.value()
-        self._settings_manager.settings.streaming.performance_slider_value = value
-        self._save()
-        self._on_performance_default_changed(value)
-        # A running cast session already picked its profile at start time --
-        # without this, the change would silently not apply until the user
-        # manually toggled Cast off and back on.
-        self._casting_controller.restart_if_casting()
 
     def _on_resolution_override_changed(self, index: int) -> None:
         self._settings_manager.settings.streaming.resolution_override = _RESOLUTION_OPTIONS[index][1]
         self._save()
-        self._update_streaming_resolution_label(self._perf_slider.value())
         self._casting_controller.restart_if_casting()
 
     def _on_fps_override_changed(self, index: int) -> None:
         self._settings_manager.settings.streaming.fps_override = self._fps_options[index][1]
         self._save()
-        self._update_streaming_resolution_label(self._perf_slider.value())
         self._casting_controller.restart_if_casting()
 
     def _on_bitrate_override_committed(self) -> None:

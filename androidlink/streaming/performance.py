@@ -16,14 +16,24 @@ Quality end, per prompt.md section 12: a lighter total frame budget makes it
 easier to sustain a high frame rate in practice than the number "60" ever
 did on its own.
 
+Whatever FPS is resolved to -- automatic or a manual override -- is always
+clamped to MAX_STREAM_FPS (165, see device/display_info.py): removing the
+old 60fps cap must never turn into requesting an arbitrarily high rate from
+a 240Hz-class panel either. When 165 itself turns out to be more than the
+real pipeline can sustain, streaming/fps_stability.py steps Automatic mode
+down to the next lower standard tier at runtime rather than forcing it or
+falling straight back to 60.
+
 Every profile also instructs the client to always prefer fresh frames over
 stale buffered ones (prompt.md section 34) — this is what actually keeps
-latency bounded regardless of resolution/FPS; see utils/latest_value_box.py.
+latency bounded regardless of resolution/FPS, and also means the app never
+needs to duplicate a frame just to pad out to the selected FPS; see
+utils/latest_value_box.py.
 """
 
 from dataclasses import dataclass
 
-from androidlink.device.display_info import FALLBACK_HZ
+from androidlink.device.display_info import FALLBACK_HZ, MAX_STREAM_FPS
 
 
 @dataclass(frozen=True)
@@ -86,6 +96,12 @@ def resolve_streaming_profile(
     None -- callers should pass the connected device's real detected refresh
     rate (device/display_info.py) here; the FALLBACK_HZ default only applies
     when no device is connected yet or detection genuinely failed.
+
+    The resolved FPS -- whichever of the two sources above wins -- is always
+    clamped to MAX_STREAM_FPS (165). This is the one place that cap is
+    actually enforced, so a device/monitor reporting a rate above it (e.g. a
+    240Hz panel) or a stale/manual override above it can never reach the
+    encoder uncapped.
     """
     value = max(0, min(100, slider_value))
 
@@ -98,7 +114,7 @@ def resolve_streaming_profile(
 
     return StreamingProfile(
         max_size=max_size_override or _lerp(low.max_size, high.max_size, t),
-        max_fps=max_fps_override or automatic_fps,
+        max_fps=min(max_fps_override or automatic_fps, MAX_STREAM_FPS),
         video_bit_rate=(
             round(bitrate_override_mbps * 1_000_000)
             if bitrate_override_mbps

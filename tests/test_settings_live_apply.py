@@ -2,9 +2,11 @@
 live instead of requiring the user to manually disconnect and reconnect
 (toggle Cast/Audio/Mic off and back on) to see them take effect:
 
-- Streaming's Resolution/FPS/Bitrate overrides and the Performance default
-  slider restart an active cast session (scrcpy can't change these on an
-  already-running session, same as Control/Audio always could).
+- Streaming's Resolution/FPS/Bitrate overrides restart an active cast
+  session (scrcpy can't change these on an already-running session, same as
+  Control/Audio always could). The Performance/Quality slider itself now
+  lives in the Device panel, not this dialog -- see
+  test_performance_slider_live_apply.py for its live-apply behavior.
 - Audio's Output Device / Also Output To likewise restart casting (a
   running QAudioSink can't be repointed at a different device).
 - Audio/Microphone Volume and Mute apply directly to the live session with
@@ -59,16 +61,6 @@ def test_bitrate_override_restarts_an_active_cast_session(qtbot, tmp_path):
 
     dialog._bitrate_spin.setValue(8)
     dialog._bitrate_spin.editingFinished.emit()
-
-    assert calls["n"] == 1
-
-
-def test_performance_default_commit_restarts_an_active_cast_session(qtbot, tmp_path):
-    _settings, dialog = _build_dialog(qtbot, tmp_path)
-    calls = _fake_restart_counter(dialog)
-
-    dialog._perf_slider.setValue(80)
-    dialog._perf_slider.sliderReleased.emit()
 
     assert calls["n"] == 1
 

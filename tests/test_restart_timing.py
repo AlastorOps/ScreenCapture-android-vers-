@@ -34,6 +34,16 @@ from androidlink.ui.panels.screen_panel import ScreenPanel
 
 class _FakeSession(QObject):
     stopped = Signal()
+    # The rest only matter to CastingController's fuller session interface
+    # (_disconnect_session_callbacks() severs these on stop -- see
+    # test_control_state_sync.py) -- Camera/MicController's real session
+    # types don't have them, but this one fake stands in for all three.
+    session_started = Signal(int, int)
+    frame_available = Signal()
+    connection_failed = Signal(str)
+    audio_unavailable = Signal(bool)
+    audio_pcm_available = Signal(bytes)
+    stats_updated = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()

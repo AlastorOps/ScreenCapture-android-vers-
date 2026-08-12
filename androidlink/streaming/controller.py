@@ -2,15 +2,17 @@ import logging
 
 from PySide6.QtCore import QObject, Signal
 
-from androidlink.device.display_info import FALLBACK_HZ
+from androidlink.device.display_info import FALLBACK_HZ, SUPPORTED_TARGET_FPS_HZ
 from androidlink.device.manager import DeviceManager
 from androidlink.input.keyboard import KeyboardInputHandler
 from androidlink.input.mouse import MouseInputHandler
 from androidlink.settings.manager import SettingsManager
+from androidlink.streaming.fps_stability import FpsStabilityMonitor
 from androidlink.streaming.performance import resolve_streaming_profile
 from androidlink.streaming.transport import CastingSession
 from androidlink.ui.panels.device_panel import DevicePanel
 from androidlink.ui.panels.screen_panel import ScreenPanel
+from androidlink.utils.monitor_info import get_primary_monitor_refresh_hz
 from androidlink.utils.platform import get_resource_path
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,13 @@ class CastingController(QObject):
         self._session: CastingSession | None = None
         self._control_enabled = False
         self._current_fps = 30
+        # Learned by _on_stats_for_stability() when Automatic FPS proves
+        # unstable at the device's real detected rate -- an extra ceiling on
+        # top of MAX_STREAM_FPS, cleared whenever the user explicitly turns
+        # Cast on again so a fresh session always gets to re-probe from the
+        # top (see fps_stability.py's module docstring).
+        self._auto_fps_ceiling: int | None = None
+        self._fps_stability_monitor: FpsStabilityMonitor | None = None
 
         settings = settings_manager.settings
         self._slider_value = settings.streaming.performance_slider_value
@@ -81,6 +90,30 @@ class CastingController(QObject):
     def save_slider_value(self) -> None:
         self._settings_manager.settings.streaming.performance_slider_value = self._slider_value
         self._settings_manager.save()
+
+    def commit_slider_value(self) -> None:
+        """Called once when the user releases the Performance/Quality
+        slider (Device panel): persists the new position and, if a cast
+        session is already running, applies it immediately by restarting
+        the session.
+
+        This is the fix for the slider "moving visually but not affecting
+        the stream": resolve_streaming_profile() (streaming/performance.py)
+        always resolved the position into a real resolution/bitrate/FPS
+        profile correctly, but previously nothing told an *already-running*
+        session to pick that profile up -- set_slider_value() (connected to
+        every drag tick) only ever updated CastingController's in-memory
+        _slider_value, so the new position only took effect the next time
+        Cast was turned on. scrcpy can't change resolution/bitrate on an
+        already-running session (same constraint restart_if_casting()
+        already handles for the Advanced Resolution/FPS/Bitrate overrides),
+        so "apply immediately" here means a fresh scrcpy-server session --
+        the Android device itself stays connected throughout, only the
+        streaming session restarts. Only fires on release (not every drag
+        tick), so dragging alone stays cheap and local.
+        """
+        self.save_slider_value()
+        self.restart_if_casting()
 
     def restart_if_casting(self) -> None:
         """Public entry point for settings changes that require a fresh
@@ -114,6 +147,7 @@ class CastingController(QObject):
 
     def _on_cast_toggled(self, enabled: bool) -> None:
         if enabled:
+            self._auto_fps_ceiling = None
             self._start_casting()
         else:
             self._stop_casting()
@@ -165,9 +199,35 @@ class CastingController(QObject):
         self._stop_casting()
 
     def _on_active_device_changed(self, device) -> None:
-        if device is None and self._session is not None:
-            self._stop_casting()
-            self._device_panel.set_casting_active(False)
+        """Fires only on a genuine connect/disconnect transition -- never on
+        a routine devices_changed poll tick for the same still-connected
+        device (DeviceManager only emits this signal when active_device
+        itself actually changes), so this is safe from accidentally tearing
+        down a live session just because a background device scan ran.
+
+        On disconnect (device is None): _control_enabled is the single
+        source of truth _start_casting() reads for whether the *next*
+        CastingSession should launch with control wired up -- resetting it
+        here, unconditionally, is what makes Control actually turn off
+        rather than just *look* off. Without this, the Device panel's
+        Control toggle silently resets itself back to unchecked on
+        disconnect (see device_panel.py's _set_cast_dependent_features_
+        availability(), which uses blockSignals() so a programmatic reset
+        never fires control_toggled -- deliberately, so it isn't logged/
+        treated as a user action) while this class's own _control_enabled
+        flag was never told about it, staying True. The next time the user
+        turned Cast back on for a reconnected device, _start_casting() would
+        then launch the new session with enable_control=True from that
+        stale flag -- mouse/keyboard genuinely wired up and working -- while
+        the UI still showed Control: OFF. That's the exact bug this reset
+        closes: one authoritative boolean, reset in the one place a session
+        (and whatever it was doing) actually goes away.
+        """
+        if device is None:
+            self._control_enabled = False
+            if self._session is not None:
+                self._stop_casting()
+                self._device_panel.set_casting_active(False)
 
     def _start_casting(self) -> None:
         device = self._device_manager.active_device
@@ -180,14 +240,32 @@ class CastingController(QObject):
 
         server_jar_path = get_resource_path(SERVER_JAR_RELATIVE_PATH)
         streaming_settings = self._settings_manager.settings.streaming
+        automatic_fps = device.refresh_rate_hz or FALLBACK_HZ
+        if self._auto_fps_ceiling is not None:
+            automatic_fps = min(automatic_fps, self._auto_fps_ceiling)
         profile = resolve_streaming_profile(
             self._slider_value,
             max_size_override=streaming_settings.resolution_override,
             max_fps_override=streaming_settings.fps_override,
             bitrate_override_mbps=streaming_settings.bitrate_override_mbps,
-            automatic_fps=device.refresh_rate_hz or FALLBACK_HZ,
+            automatic_fps=automatic_fps,
         )
         self._current_fps = profile.max_fps
+
+        monitor_hz = get_primary_monitor_refresh_hz()
+        logger.info(
+            "Starting cast: target=%dfps (device=%sHz, PC monitor=%sHz)",
+            profile.max_fps, device.refresh_rate_hz, monitor_hz,
+        )
+
+        # Only probe for instability in Automatic mode -- a manual
+        # fps_override is a deliberate user choice this never second-guesses
+        # (see fps_stability.py's module docstring).
+        self._fps_stability_monitor = (
+            FpsStabilityMonitor(profile.max_fps, SUPPORTED_TARGET_FPS_HZ)
+            if streaming_settings.fps_override is None
+            else None
+        )
 
         self._screen_panel.show_placeholder("Connecting...")
 
@@ -218,6 +296,7 @@ class CastingController(QObject):
         session.audio_unavailable.connect(self._on_audio_unavailable)
         session.audio_pcm_available.connect(self.audio_pcm_ready)
         session.stats_updated.connect(self.stats_updated)
+        session.stats_updated.connect(self._on_stats_for_stability)
 
         if self._control_enabled:
             self._mouse_handler.control_message.connect(session.send_control_message)
@@ -239,7 +318,9 @@ class CastingController(QObject):
         was_running = self._session is not None
         if self._session is not None:
             self._disconnect_input_handlers(self._session)
+            self._disconnect_session_callbacks(self._session)
             self._session.stop()
+            self._session.deleteLater()
             self._session = None
 
         self._screen_panel.show_placeholder("Waiting for device")
@@ -253,10 +334,59 @@ class CastingController(QObject):
             except (TypeError, RuntimeError):
                 pass  # was never connected (control was off for this session)
 
+    def _disconnect_session_callbacks(self, session: CastingSession) -> None:
+        """Severs every session->controller signal connection _start_casting()
+        made for this specific session, so a callback still in flight from a
+        worker thread that's only mid-teardown (queued before stop() was
+        called, e.g. a trailing frame_available/stats_updated) can never run
+        against self._session/self._current_fps after they've already moved
+        on to a different (or no) session -- the concrete mechanism behind
+        the "stale connections from an old device session must not affect a
+        newly connected one" requirement. Each CastingSession instance is
+        its own Qt object with its own signals, so once disconnected here
+        there is no path left for it to reach these handlers at all -- not a
+        race to lose, a connection that no longer exists.
+
+        `stopped` is deliberately left connected: CastingSession's own
+        teardown and _restart_if_casting()'s restart-chaining both still
+        need it to fire exactly once more after this call.
+        """
+        for signal in (
+            session.session_started,
+            session.frame_available,
+            session.connection_failed,
+            session.audio_unavailable,
+            session.audio_pcm_available,
+            session.stats_updated,
+        ):
+            try:
+                signal.disconnect()
+            except (TypeError, RuntimeError):
+                pass  # nothing was connected
+
     def _on_session_started(self, width: int, height: int) -> None:
         logger.info("Casting session started: %dx%d", width, height)
         self._screen_panel.show_video()
         self.cast_session_started.emit(width, height, self._current_fps, self._audio_enabled)
+
+    def _on_stats_for_stability(self, sample) -> None:
+        """Feeds measured delivery stats into the Automatic-mode instability
+        monitor (fps_stability.py); a confirmed-unstable window lowers
+        _auto_fps_ceiling and restarts casting at the next lower standard
+        tier. A no-op in manual-FPS mode (monitor is None, see
+        _start_casting())."""
+        if self._fps_stability_monitor is None:
+            return
+        lower_tier = self._fps_stability_monitor.record_sample(sample.stream_fps, sample.dropped_frames)
+        if lower_tier is None:
+            return
+        logger.info(
+            "Automatic FPS at %d looked unstable; stepping down to %d",
+            self._fps_stability_monitor.target_fps, lower_tier,
+        )
+        self._auto_fps_ceiling = lower_tier
+        self._fps_stability_monitor = None
+        self._restart_if_casting()
 
     def _on_frame_available(self) -> None:
         if self._session is None:
@@ -276,6 +406,8 @@ class CastingController(QObject):
         was_running = self._session is not None
         if self._session is not None:
             self._disconnect_input_handlers(self._session)
+            self._disconnect_session_callbacks(self._session)
+            self._session.deleteLater()
         self._mouse_handler.set_enabled(False)
         self._keyboard_handler.set_enabled(False)
         self._device_panel.set_casting_active(False)
