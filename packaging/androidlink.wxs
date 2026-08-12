@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AndroidLink WiX installer source.
+
+  This authors its own wizard page sequence rather than using one of
+  WixUIExtension's built-in dialog sets (WixUI_InstallDir etc.) as is,
+  because the app needs several custom informational/notice pages spliced
+  into the flow that no built-in set provides. Only the utility dialogs
+  (progress, browse-for-folder, disk-cost, error, resume-after-reboot,
+  cancel-confirmation) are reused as is from WixUIExtension via DialogRef;
+  those are pulled in unmodified. Every wizard content page (Welcome,
+  Notice, Features, Requirements, InstallDir, VerifyReady, Exit) is
+  authored here directly so its text can be fully custom.
+
+  The Publish/Show wiring in this file was cross-checked against
+  WixUIExtension's own real source (wixtoolset/wix3, src/ext/UIExtension/
+  wixlib/*.wxs) rather than assumed from memory: the exact mechanism by
+  which, for example, ALExitDialog appears automatically after a successful
+  install (a Show Dialog="ALExitDialog" OnExit="success" entry, inside
+  ALExitDialog.wxs itself) or how ALVerifyReadyDlg's Install button behaves
+  under low disk space conditions is intentionally copied from there
+  rather than reinvented, since getting an interactive wizard's dialog
+  chain subtly wrong is very hard to catch without a human clicking
+  through it.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="AndroidLink"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="AndroidLink"
+           UpgradeCode="$(var.UpgradeCode)">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine"
+             Description="AndroidLink Setup"
+             Comments="AndroidLink is a Windows application designed to connect and interact with an Android phone from a PC." />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of AndroidLink is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AndroidLinkIcon" SourceFile="$(var.DistDir)\AndroidLink.exe" />
+    <Property Id="ARPPRODUCTICON" Value="AndroidLinkIcon" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="INSTALLDESKTOPSHORTCUT" Value="1" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="AndroidLink" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="AndroidLink" />
+      </Directory>
+      <Directory Id="DesktopFolder" />
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="*" Win64="yes">
+        <File Id="AndroidLinkEXE" Name="AndroidLink.exe" Source="$(var.DistDir)\AndroidLink.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="UninstallExecutable" Guid="*" Win64="yes">
+        <File Id="UninstallEXE" Name="Uninstall.exe" Source="$(var.DistDir)\Uninstall.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="DesktopShortcutComponent" Guid="*" Win64="yes">
+        <Condition>INSTALLDESKTOPSHORTCUT</Condition>
+        <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="AndroidLink"
+                  Description="Mirror and control your Android phone from Windows"
+                  Target="[INSTALLFOLDER]AndroidLink.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\AndroidLink" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcutComponent" Guid="*" Win64="yes">
+        <Shortcut Id="StartMenuShortcut" Name="AndroidLink"
+                  Description="Mirror and control your Android phone from Windows"
+                  Target="[INSTALLFOLDER]AndroidLink.exe" WorkingDirectory="INSTALLFOLDER" />
+        <Shortcut Id="StartMenuUninstallShortcut" Name="Uninstall AndroidLink"
+                  Description="Uninstall AndroidLink"
+                  Target="[INSTALLFOLDER]Uninstall.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\AndroidLink" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="AndroidLink" Level="1" Absent="disallow" AllowAdvertise="no" ConfigurableDirectory="INSTALLFOLDER">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="UninstallExecutable" />
+      <ComponentRef Id="StartMenuShortcutComponent" />
+      <ComponentRef Id="DesktopShortcutComponent" />
+    </Feature>
+
+    <UIRef Id="WixUI_Common" />
+
+    <UI>
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <!-- Reused as-is from WixUIExtension: pure utility dialogs (progress,
+           browse-for-folder, disk cost, errors, cancel confirmation,
+           resume-after-reboot) that don't need any custom wording. -->
+      <DialogRef Id="BrowseDlg" />
+      <DialogRef Id="CancelDlg" />
+      <DialogRef Id="DiskCostDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="OutOfDiskDlg" />
+      <DialogRef Id="OutOfRbDiskDlg" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+
+      <!-- ============================================================
+           Page 1: Installer Information (custom)
+           ============================================================ -->
+      <Dialog Id="ALInfoDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="15" Width="340" Height="15" Transparent="yes" NoPrefix="yes">
+          <Text>{\WixUI_Font_Title}Welcome to the AndroidLink Setup Wizard</Text>
+        </Control>
+        <Control Id="Description" Type="Text" X="15" Y="35" Width="340" Height="20" Transparent="yes" NoPrefix="yes">
+          <Text>You are about to install AndroidLink on this computer.</Text>
+        </Control>
+        <Control Id="BodyText" Type="Text" X="15" Y="60" Width="340" Height="150" NoPrefix="yes">
+          <Text>AndroidLink is a Windows application designed to connect and interact with an Android phone from a PC. It provides the required PC-side components for AndroidLink functionality, including screen mirroring, remote control, audio, camera, and microphone features, over a direct USB connection.&#13;&#10;&#13;&#10;Please review the information on the following pages before continuing with the installation.&#13;&#10;&#13;&#10;Click Next to continue.</Text>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Property="WixUI_InstallMode" Value="Repair" Order="1">Installed</Publish>
+          <Publish Event="NewDialog" Value="ALVerifyReadyDlg" Order="2">Installed</Publish>
+          <Publish Event="NewDialog" Value="ALNoticeDlg" Order="3">NOT Installed</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <InstallUISequence>
+        <Show Dialog="ALInfoDlg" Before="ProgressDlg" Overridable="yes">NOT Installed</Show>
+      </InstallUISequence>
+
+      <!-- ============================================================
+           Page 2: Important Notice (custom)
+           ============================================================ -->
+      <Dialog Id="ALNoticeDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="15" Width="340" Height="15" Transparent="yes" NoPrefix="yes">
+          <Text>{\WixUI_Font_Title}Important Notice</Text>
+        </Control>
+        <Control Id="BodyText" Type="Text" X="15" Y="40" Width="340" Height="180" NoPrefix="yes">
+          <Text>AndroidLink communicates with your Android device over a direct USB connection using Android Debug Bridge (ADB).&#13;&#10;&#13;&#10;Some AndroidLink features may require additional permissions, USB debugging, drivers, or configuration on the Android device.&#13;&#10;&#13;&#10;Certain features may use additional CPU, GPU, RAM, USB, or camera resources while they are running.&#13;&#10;&#13;&#10;Performance Notice: using multiple AndroidLink features at the same time (for example, screen casting, camera, and microphone together) may increase system resource usage and can reduce performance depending on your PC and Android device.&#13;&#10;&#13;&#10;Please make sure you understand what AndroidLink does before continuing.</Text>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="ALInfoDlg">1</Publish>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="ALFeaturesDlg">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- ============================================================
+           Page 3: AndroidLink Features (custom, includes the Camera
+           Performance Notice near the camera bullet since the installed
+           app does include the camera feature)
+           ============================================================ -->
+      <Dialog Id="ALFeaturesDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="15" Width="340" Height="15" Transparent="yes" NoPrefix="yes">
+          <Text>{\WixUI_Font_Title}AndroidLink Features</Text>
+        </Control>
+        <Control Id="BodyText" Type="Text" X="15" Y="40" Width="340" Height="115" NoPrefix="yes">
+          <Text>This installation includes the following AndroidLink features:&#13;&#10;&#13;&#10;&#8226; Android device connection and management over USB&#13;&#10;&#8226; Live Android screen mirroring/display on this PC&#13;&#10;&#8226; Remote control of the Android device (PC mouse and keyboard forwarded to the phone)&#13;&#10;&#8226; Android audio playback through this PC&#13;&#10;&#8226; Android camera as a Windows virtual webcam&#13;&#10;&#8226; Android microphone as a Windows virtual microphone&#13;&#10;&#8226; PC-side screen recording and screenshots&#13;&#10;&#8226; Required Windows-side components for the features above</Text>
+        </Control>
+        <Control Id="CameraNoticeBox" Type="GroupBox" X="15" Y="160" Width="340" Height="60" />
+        <Control Id="CameraNoticeText" Type="Text" X="22" Y="167" Width="326" Height="48" NoPrefix="yes">
+          <Text>Camera Performance Notice: using the camera feature at the same time as other AndroidLink features may increase CPU/GPU usage and may affect application performance. For the best performance, close unnecessary applications and avoid enabling several resource-intensive features at once.</Text>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="ALNoticeDlg">1</Publish>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="ALRequirementsDlg">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- ============================================================
+           Page 4: Installation Requirements (custom)
+           ============================================================ -->
+      <Dialog Id="ALRequirementsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="15" Width="340" Height="15" Transparent="yes" NoPrefix="yes">
+          <Text>{\WixUI_Font_Title}Installation Requirements</Text>
+        </Control>
+        <Control Id="BodyText" Type="Text" X="15" Y="40" Width="340" Height="180" NoPrefix="yes">
+          <Text>AndroidLink requires the following:&#13;&#10;&#13;&#10;&#8226; Windows 10 or Windows 11 (64-bit)&#13;&#10;&#8226; An Android phone running Android 10 or newer&#13;&#10;&#8226; A USB data cable (not charge-only) connecting the phone to this PC&#13;&#10;&#8226; USB debugging enabled and authorized on the Android device&#13;&#10;&#13;&#10;Optional, only if you want the corresponding feature:&#13;&#10;&#8226; OBS Studio or Unity Capture, for the Camera-as-webcam feature&#13;&#10;&#8226; A virtual-audio-cable driver (e.g. VB-Audio Virtual Cable), for the Microphone feature&#13;&#10;&#13;&#10;No internet connection or network access is required -- AndroidLink communicates with your phone entirely over USB.</Text>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="ALFeaturesDlg">1</Publish>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="ALInstallDirDlg">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- ============================================================
+           Page 5: Install location (custom: stock ALInstallDirDlg layout
+           + a "create a Desktop shortcut" checkbox)
+           ============================================================ -->
+      <Dialog Id="ALInstallDirDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes">
+          <Text>{\WixUI_Font_Title}Choose Install Location</Text>
+        </Control>
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="320" Height="15" Transparent="yes" NoPrefix="yes">
+          <Text>Choose the folder in which to install AndroidLink.</Text>
+        </Control>
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="FolderLabel" Type="Text" X="20" Y="60" Width="290" Height="30" NoPrefix="yes">
+          <Text>Install AndroidLink to:</Text>
+        </Control>
+        <Control Id="Folder" Type="PathEdit" X="20" Y="100" Width="320" Height="18" Property="WIXUI_INSTALLDIR" Indirect="yes" />
+        <Control Id="DesktopShortcutCheckBox" Type="CheckBox" X="20" Y="155" Width="320" Height="18"
+                  Property="INSTALLDESKTOPSHORTCUT" CheckBoxValue="1" Text="Create a shortcut on the Desktop" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="ALRequirementsDlg">1</Publish>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1">1</Publish>
+          <Publish Event="DoAction" Value="WixUIValidatePath" Order="2">NOT WIXUI_DONTVALIDATEPATH</Publish>
+          <Publish Event="SpawnDialog" Value="ALInvalidDirDlg" Order="3"><![CDATA[NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID<>"1"]]></Publish>
+          <Publish Event="NewDialog" Value="ALVerifyReadyDlg" Order="4">WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID="1"</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+        <Control Id="ChangeFolder" Type="PushButton" X="20" Y="120" Width="66" Height="17" Text="Browse...">
+          <Publish Property="_BrowseProperty" Value="[WIXUI_INSTALLDIR]" Order="1">1</Publish>
+          <Publish Event="SpawnDialog" Value="BrowseDlg" Order="2">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- A minimal "that path isn't valid" message dialog: the real
+           InvalidDirDlg from WixUI_Common isn't included since it's part
+           of WixUI_Advanced, not the small set of dialogs referenced
+           above; this is simpler than pulling in another whole fragment
+           set for one edge case. -->
+      <Dialog Id="ALInvalidDirDlg" Width="260" Height="85" Title="[ProductName] Setup">
+        <Control Id="Text" Type="Text" X="48" Y="15" Width="194" Height="40" NoPrefix="yes">
+          <Text>The folder path you entered is not valid. Please verify that the path is a valid, writable folder location.</Text>
+        </Control>
+        <Control Id="OK" Type="PushButton" X="102" Y="57" Width="56" Height="17" Default="yes" Cancel="yes" Text="OK">
+          <Publish Event="EndDialog" Value="Return">1</Publish>
+        </Control>
+      </Dialog>
+
+      <!-- ============================================================
+           Page 6: Ready to Install (custom text; disk-space-aware
+           Install button logic below is copied from WixUIExtension's
+           real ALVerifyReadyDlg.wxs, trimmed to the Install-only path
+           since this installer has no Modify/Repair/Remove UI:
+           command-line `msiexec /f` repair still works independently
+           of this dialog)
+           ============================================================ -->
+      <Dialog Id="ALVerifyReadyDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="15" Width="300" Height="15" Transparent="yes" NoPrefix="yes">
+          <Text>{\WixUI_Font_Title}Ready to Install AndroidLink</Text>
+        </Control>
+        <Control Id="BodyText" Type="Text" X="25" Y="40" Width="320" Height="90" NoPrefix="yes">
+          <Text>AndroidLink is ready to be installed on this computer.&#13;&#10;&#13;&#10;Please make sure you have reviewed the information and notices above before continuing.&#13;&#10;&#13;&#10;Click Install to begin.</Text>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <!-- Back sits at X=156 here, not the usual X=180 every other page
+             uses: this page's action button is 80 units wide (below;
+             ElevationShield="yes" reserves extra room for the UAC shield
+             glyph so it doesn't crowd "Install"), 24 units wider than a
+             normal 56-unit Next button, extending 24 units further left
+             (X=212 vs the usual X=236) to keep it right-aligned the same
+             as every other page's Next. Back has to shift left by that
+             same 24 units or the two buttons overlap; confirmed against
+             WixUIExtension's own real VerifyReadyDlg.wxs source, which
+             uses this exact X=156/212 pairing for the same reason. -->
+        <Control Id="Back" Type="PushButton" X="156" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="ALInstallDirDlg" Order="1">NOT Installed</Publish>
+          <Publish Event="NewDialog" Value="ALInfoDlg" Order="2">Installed</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+        <Control Id="Install" Type="PushButton" ElevationShield="yes" X="212" Y="243" Width="80" Height="17" Default="yes" Text="Install">
+          <Publish Event="EndDialog" Value="Return"><![CDATA[OutOfDiskSpace <> 1]]></Publish>
+          <Publish Event="SpawnDialog" Value="OutOfRbDiskDlg">OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND (PROMPTROLLBACKCOST="P" OR NOT PROMPTROLLBACKCOST)</Publish>
+          <Publish Event="EndDialog" Value="Return">OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST="D"</Publish>
+          <Publish Event="EnableRollback" Value="False">OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST="D"</Publish>
+          <Publish Event="SpawnDialog" Value="OutOfDiskDlg">(OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 1) OR (OutOfDiskSpace = 1 AND PROMPTROLLBACKCOST="F")</Publish>
+        </Control>
+        <Control Id="Repair" Type="PushButton" X="212" Y="243" Width="80" Height="17" Hidden="yes" Disabled="yes" Text="Repair">
+          <Condition Action="show">WixUI_InstallMode = "Repair"</Condition>
+          <Condition Action="enable">WixUI_InstallMode = "Repair"</Condition>
+          <Condition Action="default">WixUI_InstallMode = "Repair"</Condition>
+          <Publish Event="ReinstallMode" Value="ecmus"><![CDATA[OutOfDiskSpace <> 1]]></Publish>
+          <Publish Event="Reinstall" Value="All"><![CDATA[OutOfDiskSpace <> 1]]></Publish>
+          <Publish Event="EndDialog" Value="Return"><![CDATA[OutOfDiskSpace <> 1]]></Publish>
+        </Control>
+      </Dialog>
+
+      <!-- ============================================================
+           Page 7: Finish (custom)
+           ============================================================ -->
+      <Dialog Id="ALExitDialog" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="15" Width="300" Height="30" Transparent="yes" NoPrefix="yes">
+          <Text>{\WixUI_Font_Title}Completing the AndroidLink Setup Wizard</Text>
+        </Control>
+        <Control Id="BodyText" Type="Text" X="15" Y="55" Width="330" Height="60" Transparent="yes" NoPrefix="yes">
+          <Text>AndroidLink has been installed successfully.&#13;&#10;&#13;&#10;Click Finish to close this wizard.</Text>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Disabled="yes" Text="Cancel" />
+        <Control Id="Finish" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Cancel="yes" Text="Finish" />
+      </Dialog>
+
+      <Publish Dialog="ALExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999">1</Publish>
+
+      <InstallUISequence>
+        <Show Dialog="ALExitDialog" OnExit="success" Overridable="yes" />
+      </InstallUISequence>
+      <AdminUISequence>
+        <Show Dialog="ALExitDialog" OnExit="success" Overridable="yes" />
+      </AdminUISequence>
+    </UI>
+
+  </Product>
+</Wix>

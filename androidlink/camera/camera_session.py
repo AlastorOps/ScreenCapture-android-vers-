@@ -1,7 +1,9 @@
 """Drives a camera-mirroring scrcpy-server session (prompt.md section 11):
 a separate session from screen casting (video_source=camera, no audio/
-control at all) whose decoded frames feed a Windows virtual camera instead
-of the on-screen render widget.
+control at all) whose decoded frames feed a Windows virtual camera, and --
+via a second LatestValueBox plus frame_available/take_latest_frame(), mirroring
+streaming/transport.py's ScrcpyVideoClient exactly -- the Device panel's Camera
+Live Preview widget.
 
 Mirrors streaming/transport.py's ScrcpyVideoClient video-socket state
 machine (same config-packet/exception-safety/plausibility fixes — see that
@@ -22,9 +24,16 @@ during development.
 import logging
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QMetaObject, QObject, QProcess, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
 
+from androidlink.camera.camera_orientation import (
+    CameraStaticInfo,
+    compute_preview_rotation_degrees,
+    get_camera_static_info,
+    get_device_rotation_degrees,
+)
 from androidlink.camera.virtual_camera import VirtualCameraSink, VirtualCameraUnavailableError
 from androidlink.streaming.decoder import UnsupportedCodecError, VideoDecoder
 from androidlink.streaming.protocol import (
@@ -49,9 +58,32 @@ DEVICE_SERVER_PATH = "/data/local/tmp/scrcpy-server.jar"
 ADB_COMMAND_TIMEOUT_MS = 10_000
 MAX_PLAUSIBLE_FRAME_DIMENSION = 16384
 
+# How often to re-check the phone's live display rotation while the camera
+# is active (camera_orientation.py's get_device_rotation_degrees()) so the
+# preview keeps adapting as the user physically rotates the phone -- there
+# is no live wire-protocol event for this (camera sessions run with
+# control=false), so polling on a worker-thread timer is the only option.
+# A couple of seconds is frequent enough to feel responsive to an actual
+# physical rotation (which takes the user a moment to perform) without
+# adding a meaningful ongoing ADB/CPU cost.
+ORIENTATION_POLL_INTERVAL_MS = 2000
+
 
 def _is_plausible_frame_size(width: int, height: int) -> bool:
     return 0 < width <= MAX_PLAUSIBLE_FRAME_DIMENSION and 0 < height <= MAX_PLAUSIBLE_FRAME_DIMENSION
+
+
+# np.rot90's default direction is counter-clockwise; CameraCharacteristics.
+# SENSOR_ORIENTATION (and this module's _preview_rotation_degrees) is the
+# clockwise correction needed, so 90/270 map to the opposite rot90 k.
+_ROT90_K_FOR_CLOCKWISE_DEGREES = {90: -1, 180: 2, 270: 1}
+
+
+def _rotate_clockwise(frame: np.ndarray, degrees: int) -> np.ndarray:
+    k = _ROT90_K_FOR_CLOCKWISE_DEGREES.get(degrees % 360, 0)
+    if k == 0:
+        return frame
+    return np.ascontiguousarray(np.rot90(frame, k=k))
 
 
 class CameraClient(QObject):
@@ -62,6 +94,7 @@ class CameraClient(QObject):
     session_started = Signal(int, int)
     connection_failed = Signal(str)
     virtual_camera_unavailable = Signal(str)
+    frame_available = Signal()  # payload lives in _preview_frame_box; see take_latest_frame()
     stopped = Signal()
 
     def __init__(
@@ -95,8 +128,37 @@ class CameraClient(QObject):
         self._pending_frame_meta: FrameMeta | None = None
 
         self._frame_box: LatestValueBox = LatestValueBox()
+        # A second, independent box for the GUI-side live preview (Device
+        # panel) -- deliberately separate from _frame_box above, which the
+        # virtual-camera output timer drains at a steady paced rate
+        # (_push_latest_frame()). LatestValueBox.take() removes the value;
+        # sharing one box between the timer-paced virtual-camera consumer
+        # and the event-driven preview consumer would make each one
+        # randomly steal frames the other was about to take. Both boxes are
+        # put() from the same decoded ndarray -- the preview box gets a
+        # rotated copy when _preview_rotation_degrees is nonzero (see
+        # _process_buffer()'s payload branch and _rotate_clockwise() above),
+        # the virtual-camera box always gets the original, unrotated array.
+        self._preview_frame_box: LatestValueBox = LatestValueBox()
         self._sink: VirtualCameraSink | None = None
         self._output_timer: QTimer | None = None
+
+        # _camera_static_info is detected once in start() (the fixed
+        # SENSOR_ORIENTATION/facing for this specific camera_id) and never
+        # changes again. _preview_rotation_degrees is the *combined*
+        # correction actually applied to preview frames -- recomputed every
+        # time _orientation_poll_timer notices the phone's live rotation has
+        # changed (camera_orientation.py's compute_preview_rotation_degrees())
+        # -- applied only to frames headed for the GUI preview box; the
+        # virtual-camera output (_frame_box) is deliberately left untouched,
+        # so none of this ever affects what OBS/Unity Capture receives
+        # (prompt.md scope: fix the preview, not the streaming/virtual-
+        # camera pipeline). 0 (the safe default) means "unknown or already
+        # upright" -- never a guessed fixed rotation.
+        self._camera_static_info: CameraStaticInfo | None = None
+        self._preview_rotation_degrees = 0
+        self._device_rotation_degrees = 0
+        self._orientation_poll_timer: QTimer | None = None
 
         self._reverse_active = False
         self._stopping = False
@@ -111,6 +173,26 @@ class CameraClient(QObject):
             self.connection_failed.emit(errors.SERVER_PUSH_FAILED.text)
             return
 
+        # Orientation detection/polling only starts once the session is
+        # actually going ahead -- no point querying (or repeatedly
+        # re-querying) rotation for a session that's about to fail its own
+        # connection_failed path below.
+        if self._camera_id is not None:
+            self._camera_static_info = get_camera_static_info(
+                self._adb_path, self._serial, self._camera_id
+            )
+            if self._camera_static_info is not None:
+                live_rotation = get_device_rotation_degrees(self._adb_path, self._serial)
+                self._device_rotation_degrees = live_rotation or 0
+                self._preview_rotation_degrees = compute_preview_rotation_degrees(
+                    self._camera_static_info, self._device_rotation_degrees
+                )
+
+                self._orientation_poll_timer = QTimer(self)
+                self._orientation_poll_timer.setInterval(ORIENTATION_POLL_INTERVAL_MS)
+                self._orientation_poll_timer.timeout.connect(self._poll_device_rotation)
+                self._orientation_poll_timer.start()
+
         local_port = self._open_listener_and_reverse_tunnel()
         if local_port is None:
             self.connection_failed.emit(errors.REVERSE_TUNNEL_FAILED.text)
@@ -121,9 +203,46 @@ class CameraClient(QObject):
         if not self._launch_server_process():
             self.connection_failed.emit(errors.SERVER_LAUNCH_FAILED.text)
 
+    def _poll_device_rotation(self) -> None:
+        """Re-checks the phone's live display rotation (see module docstring
+        for why this has to be polled rather than pushed) and, if it's
+        genuinely changed since the last check, recomputes the preview
+        rotation so it keeps tracking the phone being physically turned --
+        without restarting the camera session."""
+        if self._camera_static_info is None:
+            return
+        live_rotation = get_device_rotation_degrees(self._adb_path, self._serial)
+        if live_rotation is None or live_rotation == self._device_rotation_degrees:
+            return
+
+        old_device_rotation = self._device_rotation_degrees
+        old_preview_rotation = self._preview_rotation_degrees
+        self._device_rotation_degrees = live_rotation
+        self._preview_rotation_degrees = compute_preview_rotation_degrees(
+            self._camera_static_info, self._device_rotation_degrees
+        )
+        logger.info(
+            "Phone display rotation changed (%d -> %d degrees); camera preview "
+            "rotation adjusted %d -> %d degrees",
+            old_device_rotation,
+            live_rotation,
+            old_preview_rotation,
+            self._preview_rotation_degrees,
+        )
+
     @Slot()
     def stop(self) -> None:
+        # Idempotent -- see streaming/transport.py's ScrcpyVideoClient.stop()
+        # for why a second call must be a genuine no-op rather than
+        # re-emitting stopped (which could trigger a second, unwanted
+        # _start_camera() while the first one is already running).
+        if self._stopping:
+            return
         self._stopping = True
+
+        if self._orientation_poll_timer is not None:
+            self._orientation_poll_timer.stop()
+            self._orientation_poll_timer = None
 
         if self._output_timer is not None:
             self._output_timer.stop()
@@ -324,6 +443,10 @@ class CameraClient(QObject):
                     else:
                         for frame in self._decoder.decode(raw):
                             self._frame_box.put(frame)
+                            self._preview_frame_box.put(
+                                _rotate_clockwise(frame, self._preview_rotation_degrees)
+                            )
+                            self.frame_available.emit()
                 except Exception:
                     logger.exception("Camera video decode error; dropping this packet")
 
@@ -366,6 +489,9 @@ class CameraClient(QObject):
         if frame is not None:
             self._sink.send(frame)
 
+    def take_latest_frame(self):
+        return self._preview_frame_box.take()
+
 
 class CameraSession(QObject):
     """GUI-thread-facing handle: owns the worker thread and re-exposes the
@@ -374,6 +500,7 @@ class CameraSession(QObject):
     session_started = Signal(int, int)
     connection_failed = Signal(str)
     virtual_camera_unavailable = Signal(str)
+    frame_available = Signal()
     stopped = Signal()
 
     def __init__(
@@ -398,10 +525,14 @@ class CameraSession(QObject):
         self._client.session_started.connect(self.session_started)
         self._client.connection_failed.connect(self.connection_failed)
         self._client.virtual_camera_unavailable.connect(self.virtual_camera_unavailable)
+        self._client.frame_available.connect(self.frame_available)
         self._client.stopped.connect(self._on_client_stopped)
 
     def start(self) -> None:
         self._thread.start()
+
+    def take_latest_frame(self):
+        return self._client.take_latest_frame()
 
     def stop(self) -> None:
         QMetaObject.invokeMethod(self._client, "stop", Qt.ConnectionType.QueuedConnection)

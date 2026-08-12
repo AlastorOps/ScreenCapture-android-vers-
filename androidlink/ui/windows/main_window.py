@@ -122,7 +122,7 @@ class MainWindow(QMainWindow):
             self._device_manager, device_panel, screen_panel, self._settings_manager
         )
         self._camera_controller = CameraController(
-            self._device_manager, device_panel, self._settings_manager
+            self._device_manager, device_panel, status_panel, self._settings_manager
         )
         self._mic_controller = MicController(
             self._device_manager, device_panel, self._settings_manager
@@ -220,6 +220,7 @@ class MainWindow(QMainWindow):
         device = self._device_manager.active_device
         self._status_panel.set_target_fps(fps)
         self._status_panel.set_display_refresh(device.refresh_rate_hz if device else None)
+        self._status_panel.set_max_supported_refresh(device.supported_refresh_rates_hz if device else None)
 
     def _build_status_bar(self) -> None:
         status_bar = self.statusBar()

@@ -201,7 +201,7 @@ Performance is a major priority.
 
 Target:
 
-* Automatic mode: the highest stable FPS up to a hard ceiling of **165 FPS**, matching the Android device's own detected refresh rate (never artificially capped at 60 for a more capable device, and never requested above 165 even for a 240Hz-class panel)
+* Automatic mode: the highest stable FPS up to a hard ceiling of **165 FPS**, matching the *highest refresh rate the Android device's screen reports supporting* -- not just whatever it happens to be actively running at right now. A device idling at 60Hz active but supporting 90/120Hz must not be permanently treated as a 60fps-max device: active and supported refresh rates are distinct, detected and logged separately, and the higher supported rate is what Automatic mode targets (never artificially capped at 60 for a more capable device, and never requested above 165 even for a 240Hz-class panel)
 * 1080p/60 and 1440p/60 at minimum where supported
 * Higher resolution/FPS when the device genuinely supports it, subject to the 165 FPS ceiling
 
@@ -220,7 +220,9 @@ The application should automatically detect:
 
 Then select the highest practical configuration.
 
-Do not blindly request the highest possible resolution if it causes instability. The same applies to FPS: if 165 FPS proves unstable, dynamically fall back to the next lower standard tier (e.g. 144) rather than forcing 165 or collapsing straight to 60.
+Do not blindly request the highest possible resolution if it causes instability. The same applies to FPS: if a target proves unstable, dynamically fall back to the next lower standard tier (e.g. 165 -> 144) rather than forcing it or collapsing straight to a much lower number.
+
+"Unstable" must be judged over a multi-second measurement window, only after the video session has actually started (the ADB push/reverse-tunnel/server-launch/socket-handshake sequence that precedes it reports 0fps for as long as it takes, which is not evidence of anything), and only acted on after *several consecutive* windows independently look bad -- a single bad window, or a brief mid-session hiccup, must never trigger a step-down or a stream restart. One good window resets the streak. This hysteresis is what stops a real bug this app had: 60fps on a 60Hz-active/higher-Hz-monitor device being marked unstable and dropped to 30fps within the first few seconds of a session, purely from measuring the connection-startup period as if it were steady-state throughput.
 
 Prioritize:
 
@@ -784,21 +786,23 @@ Example:
 ```text
 PERFORMANCE
 
-Display Refresh  165 Hz
-Target FPS       165
-Render FPS       164.2
-Stream FPS       164.7
-Dropped Frames   0
-Resolution       2560 × 1440
-Bitrate          35 Mbps
-Codec            H.264
-Decode           Hardware
-Latency          ~18 ms
-CPU              12%
-GPU              18%
+Display Refresh (Active)   165 Hz
+Max Supported Refresh      165 Hz
+Target FPS                 165
+Render FPS                 164.2
+Stream FPS                 164.7
+Dropped Frames             0
+Late Frames                0
+Resolution                 2560 × 1440
+Bitrate                    35 Mbps
+Codec                      H.264
+Decode                     Hardware
+Latency                    ~18 ms
+CPU                        12%
+GPU                        18%
 ```
 
-Target FPS is what's actually requested from the encoder (never shown as if it were a measurement); Display Refresh, Render FPS, Stream FPS, Dropped Frames, Resolution, Bitrate, and Codec are all genuinely measured values, never fabricated.
+Target FPS is what's actually requested from the encoder (never shown as if it were a measurement); everything else is a genuinely measured value, never fabricated. Display Refresh (Active) and Max Supported Refresh are deliberately separate rows -- a device can be actively running at a lower refresh rate than it supports, and Automatic FPS targets the supported maximum, not the active rate (see section 5's Automatic Mode). Dropped Frames is a consumer-side measurement (frames overwritten in the render queue before being shown); Late Frames is a source-side measurement (a real gap in the encoder's own frame timestamps, well beyond what the target FPS predicts) -- the two are tracked separately because they point at different bottlenecks, and neither counts ordinary timing jitter as a problem.
 
 ---
 

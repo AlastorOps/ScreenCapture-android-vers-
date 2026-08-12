@@ -14,6 +14,7 @@ a = Analysis(
     datas=[
         (str(repo_root / "androidlink" / "ui" / "themes" / "qss"), "androidlink/ui/themes/qss"),
         (str(repo_root / "androidlink" / "vendor" / "scrcpy"), "androidlink/vendor/scrcpy"),
+        (str(repo_root / "androidlink" / "assets" / "icons"), "androidlink/assets/icons"),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -38,4 +39,5 @@ exe = EXE(
     upx=False,
     console=False,
     runtime_tmpdir=None,
+    icon=str(repo_root / "androidlink" / "assets" / "icons" / "androidlink.ico"),
 )

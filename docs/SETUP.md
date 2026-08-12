@@ -64,15 +64,29 @@ Android.
 
 ## 4. Installing AndroidLink
 
-### Option A — prebuilt executable
+### Option A — Windows Installer (.msi)
+
+Download or build `AndroidLink.msi` (see
+[Building the Windows Installer](#6b-building-the-windows-installer-msi) if you're
+building it yourself) and run it. It's a short wizard — an information page explaining
+what AndroidLink is, an important-notice page, a features page, an installation-
+requirements page, an install-location page (with an optional Desktop shortcut
+checkbox), and a confirmation page — before anything is written to disk. It installs to
+`Program Files\AndroidLink`, adds Start Menu and Desktop shortcuts, registers a normal
+Add/Remove Programs entry, and drops a real `Uninstall.exe` into the install folder as a
+second way to uninstall later. Because it installs per-machine, Windows will prompt for
+administrator permission (UAC) — that's expected, not a sign anything is wrong. Windows
+SmartScreen may also warn about an unsigned installer from an unknown publisher the
+first time; this is expected for an unsigned indie build.
+
+### Option B — prebuilt executable (no installer)
 
 Download `AndroidLink.exe` (see [Building the Windows executable](#6-building-the-windows-executable)
-if you're building it yourself) and run it directly — no installer, no Python
-required. Windows SmartScreen may warn about an unsigned executable from an unknown
-publisher the first time; this is expected for an unsigned indie build, not a sign
-anything is wrong.
+if you're building it yourself) and run it directly from wherever you put it — no
+install step, no Python required, nothing added to Start Menu/Add-Remove-Programs.
+Same SmartScreen note as above applies.
 
-### Option B — running from source (development)
+### Option C — running from source (development)
 
 ```
 python -m venv .venv
@@ -111,6 +125,30 @@ projects and AndroidLink never silently installs a system driver on your behalf
 There is no separate "build the Android companion" step, because there is no companion
 Android app in this project (see
 [ARCHITECTURE.md](ARCHITECTURE.md#no-companion-android-app)).
+
+## 6b. Building the Windows Installer (.msi)
+
+Build the exe first (section 6 above), then:
+
+```
+python packaging/build_msi.py
+```
+
+This produces `dist/AndroidLink.msi` by wrapping the already-built `dist/AndroidLink.exe`
+— it doesn't rebuild the app itself, so re-run section 6 first if you've changed any
+code. Built with the [WiX Toolset](https://wixtoolset.org/) v3; `build_msi.py` downloads
+WiX's standalone binaries automatically into `packaging/.wix-tools/` on first run (a
+one-time ~40MB download, no installation, nothing added to PATH or the registry). It
+also builds a small `Uninstall.exe` from `packaging/uninstall_stub.py`, installed
+alongside the app.
+
+The resulting installer is a short wizard (see section 4, Option A, for what each page
+covers) that does a per-machine install to `Program Files\AndroidLink` (UAC prompt
+expected), adds Start Menu and Desktop shortcuts, registers a standard Add/Remove
+Programs entry, and installs a real `Uninstall.exe` into the install folder. Installing a
+newer build over an older one is handled automatically (WiX's `<MajorUpgrade>` removes
+the old version as part of installing the new one). See `packaging/androidlink.wxs` and
+`packaging/build_msi.py`'s module docstrings for more detail.
 
 ## 7. Virtual webcam setup (phone camera → Windows apps)
 

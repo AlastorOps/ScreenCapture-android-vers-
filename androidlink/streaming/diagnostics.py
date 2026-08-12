@@ -17,3 +17,11 @@ class DiagnosticsSample:
     resolution: tuple[int, int] | None
     codec: str | None
     hardware_decode: bool | None = None  # None until a decoder exists for this session
+    #: Frames whose wire PTS gap from the previous frame was well beyond
+    #: what the current target FPS would predict -- a genuine encoder/
+    #: transport-side delivery gap, derived from real frame timestamps
+    #: (streaming/protocol.py's FrameMeta.pts_us), not from PC-side receive
+    #: jitter. Distinct from dropped_frames (a *consumer*-side measurement:
+    #: frames that arrived fine but were overwritten before the renderer
+    #: took them) -- see transport.py's _record_frame_timing().
+    late_frames: int = 0

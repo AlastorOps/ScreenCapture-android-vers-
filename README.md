@@ -33,8 +33,16 @@ Full step-by-step instructions (including enabling USB debugging on the phone) a
 
 ## Installation & running
 
-**Prebuilt exe:** download/build `AndroidLink.exe` (see below) and run it directly — no
-Python install required.
+**Installer:** download/build `AndroidLink.msi` (see
+[Building the Windows Installer](#building-the-windows-installer-msi) below) and run it —
+a full wizard (what AndroidLink is, an important-notice page, a features page, an
+install-requirements page, install location, confirmation) installs to Program Files
+with Start Menu/Desktop shortcuts, a normal Add/Remove Programs entry, and a real
+`Uninstall.exe` in the install folder. No Python required.
+
+**Prebuilt exe (no installer):** download/build `AndroidLink.exe` (see
+[Building the Windows executable](#building-the-windows-executable) below) and run it
+directly from wherever you put it — no install step, no Python required.
 
 **From source (development):**
 
@@ -65,6 +73,37 @@ AndroidLink has no companion Android app in its architecture; see
 [docs/ARCHITECTURE.md § No companion Android app](docs/ARCHITECTURE.md#no-companion-android-app)
 for why.
 
+**Building the Windows Installer (.msi):**
+
+```
+pip install -e ".[build]"
+pyinstaller packaging/androidlink.spec --distpath dist --workpath build --noconfirm
+python packaging/build_msi.py
+```
+
+Produces `dist/AndroidLink.msi` from the `AndroidLink.exe` built by the step above (build
+the exe first — `build_msi.py` wraps it, it doesn't rebuild the app itself). Built with
+the [WiX Toolset](https://wixtoolset.org/) v3, whose standalone binaries (candle.exe/
+light.exe) `build_msi.py` downloads automatically into `packaging/.wix-tools/` on first
+run — no separate install, nothing added to PATH or the registry. `build_msi.py` also
+builds a small `Uninstall.exe` (from `packaging/uninstall_stub.py`) that gets installed
+alongside the app.
+
+The installer is a full wizard, not a silent drop: an Installer Information page
+explaining what AndroidLink is, an Important Notice page (USB/ADB, permissions,
+resource-usage warnings), a Features page (with a Camera Performance Notice), an
+Installation Requirements page, an install-location picker (with an optional Desktop
+shortcut checkbox), and a Ready to Install confirmation before anything is written to
+disk. It's a real Windows Installer package: per-machine install to
+`Program Files\AndroidLink` (a UAC prompt is expected), Start Menu and Desktop
+shortcuts, a standard Add/Remove Programs entry, and a real `Uninstall.exe` inside the
+install folder as a second way to uninstall. `<MajorUpgrade>` handles installing a
+newer build over an older one automatically (the old version is removed as part of
+installing the new one) — see `packaging/androidlink.wxs` and
+`packaging/build_msi.py`'s module docstrings for the full detail, including exactly
+which parts of the wizard's dialog wiring were cross-checked against WiX's own real
+source rather than assumed from memory.
+
 ## Virtual webcam / virtual microphone
 
 The Camera feature exposes the phone's camera as a real Windows video-capture device
@@ -90,7 +129,7 @@ platform/scope constraints, not bugs.
 
 ## Development phases
 
-This project was built in phases (see `prompt.md` for the full spec). All 9 phases are
+This project was built in phases (see `prompt.md` for the full spec). All 11 phases are
 now implemented:
 
 - **Phase 1: project foundation** — application shell, theming, settings persistence, logging.
@@ -184,8 +223,9 @@ now implemented:
     Qt's native dock machinery — a View menu exposes a checkable toggle per panel plus
     "Restore Default Layout," and the arrangement (`QMainWindow.saveState()`, base64-
     encoded) persists to `settings.general.layout_state` across restarts. The
-    Performance/Quality slider stays fixed as a non-movable bottom toolbar, not a
-    dockable panel, per the spec. The slider snaps to discrete levels of 10 as you
+    Performance/Quality slider stayed fixed as a non-movable bottom toolbar, not a
+    dockable panel, per the spec at the time — **superseded in Phase 11**, where it
+    moved into the Device panel (see Phase 11 below). The slider snaps to discrete levels of 10 as you
     drag it (`ui/widgets/slider_labeled.py`'s `snap_value()`, with tick marks showing
     where it'll land) rather than stopping at an arbitrary pixel-derived value, and
     shows a live resolution readout next to it (e.g. "~1080p (1920px)") reflecting the
@@ -328,7 +368,10 @@ now implemented:
     cast session on demand (`CastingController.restart_if_casting()`), enabled only
     while actually casting. Verified against real hardware: dragging the slider alone
     left the session untouched; clicking Refresh restarted it and the device genuinely
-    switched resolution (1920×1200 → 1280×800).
+    switched resolution (1920×1200 → 1280×800). **Superseded in Phase 11**: this
+    dedicated slider+Refresh-button toolbar was removed entirely when the slider moved
+    into the Device panel and started applying live on release instead (no separate
+    button needed any more) — see Phase 11 below.
 - **Phase 10: theme system fix, uncapped FPS, and pipeline performance** — complete:
   - **Theme fix**: the Theme dropdown in Settings → General was permanently disabled
     ("Dark" only) and, more importantly, changing the accent color never actually
@@ -435,3 +478,134 @@ now implemented:
     actually decoded, which is reported as-is rather than rounded up to the target;
     the real bottleneck at that combination is the device's own encoder/USB throughput,
     not anything left uncapped in this app's Python/Qt pipeline.
+- **Phase 11: 165fps ceiling with Automatic FPS, crash-safety hardening, and camera UI
+  overhaul** — complete:
+  - **165fps ceiling + Automatic FPS mode**: `MAX_STREAM_FPS` is now a hard 165 (never
+    higher, regardless of how fast a connected panel actually is), with Automatic mode
+    starting optimistic — it targets the device's highest *supported* refresh rate
+    (`device.supported_refresh_rates_hz`), not just whatever it's *actively* running at
+    right now, since many Android devices idle at a lower rate than their panel actually
+    supports. A new `streaming/fps_stability.py` watches real delivered-FPS and
+    dropped-frame samples over rolling multi-second windows (`WINDOW_SAMPLES = 8`,
+    roughly 8 seconds per window at the existing 1-sample/s diagnostics cadence) and only
+    calls a target genuinely "unstable" once `CONSECUTIVE_UNSTABLE_WINDOWS_REQUIRED = 2`
+    windows in a row look bad — hysteresis specifically added after an early version
+    falsely flagged ordinary startup jitter and dropped straight from 165→30 within a
+    couple of seconds. **Currently measure-and-log only**: `streaming/controller.py`'s
+    `AUTO_FPS_RESTART_ENABLED` is deliberately `False` — a decision made while chasing
+    the crash described below (to rule out the FPS controller as the cause without an
+    always-on auto-restart complicating the picture) and not yet turned back on, so
+    Automatic FPS currently reports what it *would* do in the logs/Diagnostics rather
+    than actually restarting the stream. Re-enabling it is a one-line flag flip once
+    it's been exercised more on real hardware.
+  - **Performance/Quality slider moved into the Device panel**: the Phase 9 fixed
+    bottom-toolbar-with-its-own-Refresh-button design (see the superseded bullets above)
+    is gone — there is now exactly one copy of the slider, living in the Device panel
+    under Microphone, which applies live the moment you release it
+    (`performance_slider_committed` → `CastingController.commit_slider_value()`,
+    restarting an already-active session) rather than needing a separate manual
+    Refresh click.
+  - **Real Camera Live Preview and Mic Input Level meter**: the Device panel's Camera
+    and Microphone sections got genuine, non-simulated monitoring — a live decoded-frame
+    preview for Camera (`camera_controller.py`'s `_on_frame_available()`, never a
+    placeholder image) and a real RMS input-level meter for Mic, both showing an honest
+    Active/Connecting/Disabled/Disconnected/No Signal status derived from whether frames
+    or audio are actually arriving, not just whether the feature is toggled on.
+  - **Crash-safety and session-lifecycle hardening**: real-device testing surfaced a
+    hard native crash ("QThread: Destroyed while thread is still running", not a
+    catchable Python exception) triggered by toggling Control, traced to
+    `CastingSession`/`CameraSession`/`MicSession` each owning an un-parented worker
+    `QThread` that could still be mid-teardown when the wrapper object was
+    `deleteLater()`'d on an immediate 0ms timer. Fixed by tying `deleteLater()` to each
+    session's own `stopped` signal instead (which only fires once the worker thread has
+    genuinely finished), across all three controllers. Alongside that: duplicate-session
+    guards (`_start_casting()`/`_start_camera()`/`_start_mic()` now safely restart rather
+    than silently running two sessions at once), idempotent `stop()` on every client, and
+    a new `utils/crash_state.py` + top-level `sys.excepthook`/`threading.excepthook` pair
+    in `app/application.py` that logs full crash context (current streaming/FPS/device
+    state) instead of the app just disappearing — collecting diagnostics only, never
+    suppressing or auto-restarting past a genuine bug.
+  - **Camera Live Preview relocated, enlarged, and orientation-corrected**: the preview
+    moved from the Device panel to the Status panel's right-side bar (directly under
+    Screenshot), grew substantially (no fixed height cap any more — `Expanding` size
+    policy on both axes with only a 220px floor, so it fills whatever space the dock
+    actually has and scales as it's resized, verified with a real offscreen-Qt layout
+    resize test), and gained rotation correction: `camera/camera_orientation.py` combines
+    the camera's fixed `CameraCharacteristics.SENSOR_ORIENTATION` (queried once via `adb
+    shell dumpsys media.camera`) with the phone's *live* display rotation (polled every
+    2s via `adb shell dumpsys input`/`dumpsys window displays`, since a camera-mirroring
+    session runs with `control=false` and has no live wire-protocol channel to push a
+    rotation-changed event) using the standard Camera2 orientation formula, so the
+    preview keeps adapting as the phone is physically turned without restarting the
+    camera session. **Not verified against real hardware** — no Android device was
+    available for this specific change, and OEM `dumpsys` output isn't guaranteed
+    identical across Android versions; every parsing step degrades to "apply no
+    rotation" (never a guessed fixed value) if a device's real output doesn't match, and
+    the raw `dumpsys` text is logged on a parse failure to make fixing it against real
+    data straightforward. A small always-visible notice under the preview reads
+    "Camera preview may affect performance when used with screen casting."
+  - **Removed the Device panel's top-left "⟳ Refresh" button**: it re-ran ADB device
+    detection on demand, but that already happens automatically on `DeviceManager`'s own
+    poll timer, making the manual button mostly a redundant no-op in practice — removed
+    along with its click handler; `DeviceManager.refresh_now()` itself (and automatic
+    polling) is untouched.
+  - **Windows Installer (.msi) packaging, first pass**: `packaging/build_msi.py` wrapped
+    the PyInstaller `AndroidLink.exe` in a real `.msi` using Python's stdlib `msilib` (no
+    external toolset needed) — per-machine install to Program Files, Start Menu/Desktop
+    shortcuts, a standard Add/Remove Programs entry. Building it for real (not just
+    assuming the table shapes were right) caught two genuine authoring bugs via an actual
+    `msiexec /a` administrative-extraction test: a registry-keyed shortcut Component
+    needs the `msidbComponentAttributesRegistryKeyPath` flag or Windows Installer
+    misreads the KeyPath as a File-table reference, and the cabinet's internal logical
+    filename has to match the File table's primary key, not the display filename.
+    **Superseded in the professional-installer pass below** — kept here as a record of a
+    real, load-bearing MSI-authoring bug hunt in case `msilib` is ever revisited.
+  - **Professional wizard-driven Windows Installer, rebuilt on WiX**: replaced the
+    `msilib`-based installer above with a proper multi-page wizard authored in WiX
+    Toolset v3 (`packaging/androidlink.wxs`), matching a much more detailed spec: an
+    Installer Information page, an Important Notice page (USB/ADB, permissions,
+    resource-usage warnings), a Features page (with a Camera Performance Notice), an
+    Installation Requirements page, an install-location picker with an optional Desktop
+    shortcut checkbox, and a Ready to Install confirmation — all before anything is
+    written to disk. `packaging/build_msi.py` now downloads WiX's standalone binaries
+    automatically (no install, nothing added to PATH), and also builds a small
+    `Uninstall.exe` (`packaging/uninstall_stub.py`) dropped into the install folder,
+    which looks up its own installation's real `UninstallString` from the Windows
+    registry at runtime and re-runs it — so uninstalling still goes through the genuine
+    MSI uninstall sequence rather than reimplementing file/registry cleanup by hand. Adds
+    `<MajorUpgrade>` support (a real WiX one-liner), fixing the previous version's "no
+    upgrade in place" limitation. The custom dialog wiring (which button goes to which
+    page, how the standard Progress/Exit dialogs get triggered automatically, how the
+    disk-space-aware Install button behaves) was authored by fetching and reading
+    WixUIExtension's own real source (wixtoolset/wix3 on GitHub) rather than reconstructed
+    from memory, specifically because a subtly wrong interactive wizard flow is very hard
+    to catch without a human clicking through it. Two more real bugs surfaced building
+    this for real: custom dialog IDs colliding with dialogs WixUIExtension already ships
+    under the same names (`FeaturesDlg`/`InstallDirDlg`/`VerifyReadyDlg`/`ExitDialog`,
+    renamed to `AL`-prefixed IDs), and `ProgramFilesFolder` not actually resolving to the
+    native 64-bit Program Files under `-arch x64` the way a first pass assumed (fixed by
+    referencing `ProgramFiles64Folder` explicitly, caught via WiX's own ICE80 validation).
+    Verified via a real `msiexec /a` administrative extraction (both `AndroidLink.exe`
+    and `Uninstall.exe` placed correctly) and a real `msiexec /i` quiet-install attempt
+    that clears LaunchConditions/CostFinalize/InstallValidate cleanly (the only remaining
+    failure is Windows correctly refusing a per-machine install from this automated,
+    non-elevated environment) — the interactive wizard's page-by-page click-through has
+    **not** been verified by an actual human yet. See
+    [Building the Windows Installer](#building-the-windows-installer-msi) below.
+  - **Fixed a real button-overlap bug on the Ready to Install page**: reported as "the
+    UAC shield icon overlaps the Install text." The actual cause wasn't shield rendering
+    at all — the Install button is intentionally 80 dialog units wide (24 wider than a
+    normal 56-unit button, to leave room for the `ElevationShield="yes"` UAC glyph
+    WixUIExtension itself draws to the left of the label) and sits 24 units further left
+    than a normal action button to stay right-aligned, but this page's Back button was
+    still authored at the generic X=180 every *other* page uses instead of the X=156
+    that specific width/position combination requires — so Back's own button face
+    overlapped Install's left 24 units, which is what actually looked like "the icon
+    covering the text." Confirmed and fixed against WixUIExtension's own real
+    VerifyReadyDlg.wxs source (same one already cited above), which uses this exact
+    X=156/212 pairing for the same reason. On DPI scaling: every control in
+    `androidlink.wxs` is already authored in MSI dialog units (not pixels), which is the
+    actual mechanism that makes Windows Installer dialogs render correctly across
+    100–200% scaling — there was no pixel-based sizing to fix. This environment can't
+    drive a live interactive dialog at a specific Windows display-scaling percentage to
+    screenshot-verify each one directly.

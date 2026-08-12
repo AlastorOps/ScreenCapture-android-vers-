@@ -25,6 +25,7 @@ from PySide6.QtCore import QMetaObject, QObject, QProcess, Qt, QThread, Signal, 
 from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
 
 from androidlink.audio.decoder import AudioDecoder, UnsupportedAudioCodecError
+from androidlink.audio.level_meter import compute_rms_level
 from androidlink.audio.virtual_audio import VirtualMicrophoneSink, VirtualMicrophoneUnavailableError
 from androidlink.streaming.protocol import (
     DEVICE_NAME_FIELD_LENGTH,
@@ -58,6 +59,7 @@ class MicClient(QObject):
     connection_failed = Signal(str)
     audio_unavailable = Signal(bool)  # is_error -- device-side capture failure
     virtual_mic_unavailable = Signal(str)
+    audio_level_updated = Signal(float)  # 0-1, real RMS of this packet's decoded PCM
     stopped = Signal()
 
     def __init__(
@@ -111,6 +113,12 @@ class MicClient(QObject):
 
     @Slot()
     def stop(self) -> None:
+        # Idempotent -- see streaming/transport.py's ScrcpyVideoClient.stop()
+        # for why a second call must be a genuine no-op rather than
+        # re-emitting stopped (which could trigger a second, unwanted
+        # _start_mic() while the first one is already running).
+        if self._stopping:
+            return
         self._stopping = True
 
         if self._sink is not None:
@@ -319,8 +327,15 @@ class MicClient(QObject):
                         self._decoder.set_extradata(raw)
                     else:
                         pcm = self._decoder.decode(raw)
-                        if pcm and self._sink is not None:
-                            self._sink.write(pcm)
+                        if pcm:
+                            # Real measured level from the exact same
+                            # decoded PCM the virtual mic sink is about to
+                            # play out -- no separate/duplicate audio
+                            # capture (prompt.md: reuse the existing
+                            # pipeline for level analysis).
+                            self.audio_level_updated.emit(compute_rms_level(pcm))
+                            if self._sink is not None:
+                                self._sink.write(pcm)
                 except Exception:
                     logger.exception("Microphone audio decode error; dropping this packet")
 
@@ -354,6 +369,7 @@ class MicSession(QObject):
     connection_failed = Signal(str)
     audio_unavailable = Signal(bool)
     virtual_mic_unavailable = Signal(str)
+    audio_level_updated = Signal(float)
     stopped = Signal()
 
     _volume_requested = Signal(float)
@@ -378,6 +394,7 @@ class MicSession(QObject):
         self._client.connection_failed.connect(self.connection_failed)
         self._client.audio_unavailable.connect(self.audio_unavailable)
         self._client.virtual_mic_unavailable.connect(self.virtual_mic_unavailable)
+        self._client.audio_level_updated.connect(self.audio_level_updated)
         self._client.stopped.connect(self._on_client_stopped)
         self._volume_requested.connect(self._client.set_volume)
         self._muted_requested.connect(self._client.set_muted)

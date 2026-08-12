@@ -257,6 +257,110 @@ def test_unsupported_codec_reports_connection_failure_instead_of_crashing(client
     assert "codec" in failures[0].lower()
 
 
+def _client_with_target_fps(target_fps: int) -> ScrcpyVideoClient:
+    profile = resolve_streaming_profile(50, max_fps_override=target_fps)
+    return ScrcpyVideoClient(
+        adb_path=Path("adb"),
+        serial="TEST_SERIAL",
+        server_jar_path=Path("unused.jar"),
+        profile=profile,
+        frame_box=LatestValueBox(),
+    )
+
+
+def _stream_with_pts(access_units: list[bytes], pts_values_us: list[int]) -> bytes:
+    stream = bytearray()
+    stream += b"Test Device".ljust(64, b"\x00")
+    stream += b"h264"
+    stream += struct.pack(">III", PACKET_FLAG_SESSION >> 32, 64, 64)
+    for i, (access_unit, pts_us) in enumerate(zip(access_units, pts_values_us)):
+        pts_and_flags = pts_us | (PACKET_FLAG_KEY_FRAME if i == 0 else 0)
+        stream += struct.pack(">QI", pts_and_flags, len(access_unit))
+        stream += access_unit
+    return bytes(stream)
+
+
+def test_late_frames_flags_a_real_pts_gap_well_beyond_the_target_interval():
+    """streaming/transport.py's _record_frame_timing(): a genuine
+    encoder/transport-side delivery gap (Android didn't produce a new frame
+    in time, or it was delayed in transit) shows up as a PTS gap well beyond
+    what the target FPS predicts -- distinct from dropped_frames (a
+    consumer-side, frame-box measurement) and never confused with ordinary
+    timing variance (prompt.md: don't count normal jitter as a dropped/late
+    frame)."""
+    client = _client_with_target_fps(60)
+    expected_interval_us = round(1_000_000 / 60)
+    # Frames 0-2 land exactly on the expected 60fps cadence -- must never
+    # count as late. Frame 3 has a genuine 200ms stall after it.
+    pts_values = [
+        0,
+        expected_interval_us,
+        expected_interval_us * 2,
+        expected_interval_us * 2 + 200_000,
+    ]
+    stream = _stream_with_pts(_access_units()[:4], pts_values)
+
+    client._recv_buffer.extend(stream)
+    client._process_buffer()
+
+    samples = []
+    client.stats_updated.connect(samples.append)
+    client._emit_stats()
+
+    assert samples[0].late_frames == 1
+
+
+def test_late_frames_does_not_flag_ordinary_pts_jitter():
+    """A few percent of jitter around the expected interval -- completely
+    normal for a real encoder -- must not be misclassified as late."""
+    client = _client_with_target_fps(60)
+    expected_interval_us = round(1_000_000 / 60)
+    jittered = [round(expected_interval_us * factor) for factor in (1.0, 0.9, 1.1, 0.95, 1.05)]
+    pts_values = [0]
+    for interval in jittered[1:]:
+        pts_values.append(pts_values[-1] + interval)
+    stream = _stream_with_pts(_access_units()[: len(pts_values)], pts_values)
+
+    client._recv_buffer.extend(stream)
+    client._process_buffer()
+
+    samples = []
+    client.stats_updated.connect(samples.append)
+    client._emit_stats()
+
+    assert samples[0].late_frames == 0
+
+
+def test_late_frame_counter_resets_after_each_emit(client):
+    stream = _build_synthetic_stream("Test Device", 640, 480)  # default fixture spacing
+    client._recv_buffer.extend(stream)
+    client._process_buffer()
+    client._emit_stats()  # drains whatever this window accumulated
+
+    samples = []
+    client.stats_updated.connect(samples.append)
+    client._emit_stats()  # nothing new since the previous emit
+
+    assert samples[0].late_frames == 0
+
+
+def test_stop_is_idempotent(client):
+    """Crash investigation (item 7: cleanup must be idempotent): a second
+    stop() call on the same client must be a genuine no-op, not re-emit
+    `stopped` -- CastingSession._on_client_stopped()/_restart_if_casting()'s
+    restart-chaining both react to that signal, so a duplicate emission
+    could trigger an unwanted second _start_casting() while a legitimate
+    one is already running (item 6: no duplicate sessions)."""
+    stopped_events = []
+    client.stopped.connect(lambda: stopped_events.append(1))
+
+    client.stop()
+    client.stop()  # must not raise, must not re-emit stopped
+    client.stop()
+
+    assert stopped_events == [1]
+
+
 def test_rejects_implausible_session_meta_as_connection_failure(client):
     """A prior version of this parser could, after desyncing, interpret
     random bytes as a SessionMeta with nonsense (even negative-looking,

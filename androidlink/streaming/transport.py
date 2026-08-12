@@ -50,6 +50,12 @@ DEVICE_SERVER_PATH = "/data/local/tmp/scrcpy-server.jar"
 ADB_COMMAND_TIMEOUT_MS = 10_000
 MAX_PLAUSIBLE_FRAME_DIMENSION = 16384  # generous upper bound; catches corrupt/garbage parses
 STATS_INTERVAL_MS = 1000
+# A frame counts as "late" only once its PTS gap from the previous frame is
+# well beyond what the target FPS would predict -- real encoders don't space
+# frames perfectly evenly even when completely healthy (prompt.md: don't
+# count normal timing variance as a dropped/late frame), so this is
+# deliberately generous rather than flagging every bit of ordinary jitter.
+LATE_FRAME_GAP_MULTIPLIER = 1.75
 
 
 def _is_plausible_frame_size(width: int, height: int) -> bool:
@@ -123,6 +129,8 @@ class ScrcpyVideoClient(QObject):
         self._bytes_received = 0
         self._decode_time_total = 0.0
         self._decode_count = 0
+        self._last_frame_pts_us: int | None = None
+        self._late_frame_count = 0
 
         self._audio_recv_buffer = bytearray()
         self._audio_stage = "audio_header"
@@ -161,6 +169,18 @@ class ScrcpyVideoClient(QObject):
 
     @Slot()
     def stop(self) -> None:
+        # Idempotent: every resource below is already individually guarded
+        # by "is not None" (so tearing down twice wouldn't touch anything
+        # already-released), but self.stopped.emit() at the end was not --
+        # calling stop() a second time on the same client would re-emit it,
+        # and CastingSession._on_client_stopped()/_restart_if_casting()'s
+        # restart-chaining both react to that signal, so a duplicate emit
+        # could trigger a second, unwanted _start_casting() while the first
+        # one is already running (item 6/7: cleanup must be idempotent, no
+        # duplicate sessions). This guard makes every call after the first
+        # a genuine no-op.
+        if self._stopping:
+            return
         self._stopping = True
 
         if self._stats_timer is not None:
@@ -358,6 +378,20 @@ class ScrcpyVideoClient(QObject):
         self._recv_buffer.extend(data)
         self._process_buffer()
 
+    def _record_frame_timing(self, pts_us: int) -> None:
+        """Flags a frame as "late" from its own wire PTS gap to the
+        previous frame -- a real, encoder/transport-side delivery gap
+        (Android didn't produce a new frame in time, or it was delayed in
+        transit), not a PC-side rendering artifact. Deliberately tolerant
+        (see LATE_FRAME_GAP_MULTIPLIER) so ordinary PTS jitter a healthy
+        stream always has isn't miscounted as a real problem."""
+        if self._last_frame_pts_us is not None and self._profile.max_fps > 0:
+            expected_interval_us = 1_000_000 / self._profile.max_fps
+            actual_interval_us = pts_us - self._last_frame_pts_us
+            if actual_interval_us > expected_interval_us * LATE_FRAME_GAP_MULTIPLIER:
+                self._late_frame_count += 1
+        self._last_frame_pts_us = pts_us
+
     def _emit_stats(self) -> None:
         decode_latency_ms = (
             (self._decode_time_total / self._decode_count) * 1000 if self._decode_count else 0.0
@@ -370,12 +404,14 @@ class ScrcpyVideoClient(QObject):
             resolution=self._last_resolution,
             codec=self._codec_name,
             hardware_decode=self._decoder.hardware_accelerated if self._decoder is not None else None,
+            late_frames=self._late_frame_count,
         )
         self.stats_updated.emit(sample)
         self._decoded_frame_count = 0
         self._bytes_received = 0
         self._decode_time_total = 0.0
         self._decode_count = 0
+        self._late_frame_count = 0
 
     def _process_buffer(self) -> None:  # noqa: C901 - simple linear state machine
         while True:
@@ -463,6 +499,8 @@ class ScrcpyVideoClient(QObject):
                             self._decoded_frame_count += 1
                             self._frame_box.put(frame)
                             self.frame_available.emit()
+                        if self._pending_frame_meta.pts_us is not None:
+                            self._record_frame_timing(self._pending_frame_meta.pts_us)
                 except Exception:
                     logger.exception("Video decode error; dropping this packet")
 

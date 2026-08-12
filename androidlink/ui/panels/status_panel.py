@@ -1,9 +1,10 @@
 import time
 
 from PySide6.QtCore import QTimer, Signal
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from androidlink.ui.panels.base_panel import BasePanel
+from androidlink.ui.widgets.camera_preview import CameraPreviewWidget
 from androidlink.ui.widgets.status_dot import StatusDot, StatusState
 
 # key -> display label. GPU is listed but never updated -- see
@@ -12,11 +13,13 @@ from androidlink.ui.widgets.status_dot import StatusDot, StatusState
 # permanent "—" with a tooltip rather than a fabricated number.
 _STREAM_METRICS = [
     ("performance_quality", "Performance/Quality"),
-    ("display_refresh", "Display Refresh"),
+    ("display_refresh", "Display Refresh (Active)"),
+    ("max_supported_refresh", "Max Supported Refresh"),
     ("target_fps", "Target FPS"),
     ("stream_fps", "Stream FPS"),
     ("render_fps", "Render FPS"),
     ("dropped", "Dropped Frames"),
+    ("late", "Late Frames"),
     ("decode", "Decode Latency"),
     ("bitrate", "Bitrate"),
     ("resolution", "Resolution"),
@@ -84,7 +87,12 @@ class StatusPanel(BasePanel):
 
         self.content_layout.addSpacing(12)
         self.content_layout.addWidget(self._build_recording_controls())
-        self.content_layout.addStretch(1)
+        # stretch=1: the Camera Live Preview claims all leftover vertical
+        # space in this dock (see _build_camera_preview_section()) instead
+        # of a trailing addStretch(1) spacer leaving that space blank --
+        # item 4/5: "use the available space efficiently" as the panel is
+        # resized, not a small fixed preview with dead space below it.
+        self.content_layout.addWidget(self._build_camera_preview_section(), stretch=1)
 
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
@@ -98,6 +106,7 @@ class StatusPanel(BasePanel):
         # section 33/34: report real measured behavior).
         self._value_labels["stream_fps"].setText(f"{sample.stream_fps:.1f}")
         self._value_labels["dropped"].setText(str(sample.dropped_frames))
+        self._value_labels["late"].setText(str(sample.late_frames))
         self._value_labels["decode"].setText(f"{sample.decode_latency_ms:.1f} ms")
         self._value_labels["bitrate"].setText(_format_bitrate(sample.bitrate_bps))
         if sample.resolution is not None:
@@ -130,10 +139,20 @@ class StatusPanel(BasePanel):
         self._value_labels["target_fps"].setText(str(fps))
 
     def set_display_refresh(self, hz: int | None) -> None:
-        """The connected Android device's own real detected display refresh
-        rate (device/display_info.py) -- may exceed Target FPS (e.g. a
-        240Hz panel still targets 165)."""
+        """The connected Android device's own real detected *active*
+        display refresh rate (device/display_info.py) -- distinct from Max
+        Supported Refresh below: a device idling at 60Hz active can still
+        support 90/120Hz, and Automatic FPS targets the supported maximum,
+        not this value (see streaming/controller.py's
+        _resolve_automatic_fps())."""
         self._value_labels["display_refresh"].setText(f"{hz} Hz" if hz else "—")
+
+    def set_max_supported_refresh(self, supported_hz: tuple[int, ...] | None) -> None:
+        """The highest refresh rate the device's screen reports *supporting*
+        (may be higher than the current active rate above) -- this, not the
+        active rate, is what Automatic FPS actually starts at."""
+        text = f"{max(supported_hz)} Hz" if supported_hz else "—"
+        self._value_labels["max_supported_refresh"].setText(text)
 
     def set_system_stats(self, cpu_percent: float, ram_mb: float) -> None:
         self._value_labels["cpu"].setText(f"{cpu_percent:.0f}%")
@@ -142,10 +161,12 @@ class StatusPanel(BasePanel):
     def reset_stream_stats(self) -> None:
         for key in (
             "display_refresh",
+            "max_supported_refresh",
             "target_fps",
             "stream_fps",
             "render_fps",
             "dropped",
+            "late",
             "decode",
             "bitrate",
             "resolution",
@@ -204,6 +225,106 @@ class StatusPanel(BasePanel):
         layout.addWidget(self._recording_message_label)
 
         return container
+
+    def _build_camera_preview_section(self) -> QWidget:
+        """The Camera Live Preview, directly under Screenshot in the Status
+        panel's right-side bar -- the only place in the app a decoded
+        camera frame is ever shown. Reuses the exact same real-frame render
+        path as the main screen mirror (ui/widgets/camera_preview.py wraps
+        streaming/renderer.py's VideoRenderWidget, which already preserves
+        aspect ratio via letterboxing and scales cleanly as this dock is
+        resized), fed by camera/camera_controller.py's _on_frame_available()
+        -- never a placeholder image. "Camera: ..." and "Status: ..." below
+        it are read-only summaries of the real selection/state; the actual
+        camera/resolution/FPS selection controls stay in the Device panel's
+        Camera feature row (prompt.md: preserve existing selection
+        controls)."""
+        container = QWidget()
+        # Expanding vertically so this container -- not just the preview
+        # widget nested inside it -- actually claims the stretch=1 leftover
+        # space __init__ gives it in content_layout; a plain QWidget's
+        # default Preferred policy would otherwise clamp back down to its
+        # children's combined size hint regardless of how much room the
+        # dock has.
+        container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 4, 0, 0)
+        layout.setSpacing(4)
+
+        title = QLabel("CAMERA PREVIEW")
+        title.setProperty("role", "muted")
+        layout.addWidget(title)
+
+        self._camera_preview_widget = CameraPreviewWidget()
+        self._camera_preview_widget.setToolTip(
+            "Live feed from the Android camera -- only active while Camera is on"
+        )
+        # stretch=1: the preview itself gets all the space this section is
+        # given; the label/status/notice rows below keep their natural
+        # (minimal) height rather than being squeezed or stretched.
+        layout.addWidget(self._camera_preview_widget, stretch=1)
+
+        self._camera_preview_label = QLabel("Camera: —")
+        self._camera_preview_label.setProperty("role", "muted")
+        layout.addWidget(self._camera_preview_label)
+
+        status_row = QWidget()
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(6)
+        status_title = QLabel("Status:")
+        status_title.setProperty("role", "muted")
+        self._camera_preview_status_dot = StatusDot(StatusState.DISCONNECTED)
+        self._camera_preview_status_text = QLabel("Disabled")
+        self._camera_preview_status_text.setProperty("role", "mono")
+        status_layout.addWidget(status_title)
+        status_layout.addWidget(self._camera_preview_status_dot)
+        status_layout.addWidget(self._camera_preview_status_text)
+        status_layout.addStretch(1)
+        layout.addWidget(status_row)
+
+        # Purely informational -- never disables the camera, never touches
+        # FPS/quality/streaming. Small and always visible rather than a
+        # popup, matching how _camera_status_label/_recording_message_label
+        # already surface asides in this app.
+        performance_notice = QLabel(
+            "ⓘ Camera preview may affect performance when used with screen casting."
+        )
+        performance_notice.setProperty("role", "muted")
+        performance_notice.setWordWrap(True)
+        layout.addWidget(performance_notice)
+
+        return container
+
+    def set_camera_preview_frame(self, frame) -> None:
+        """frame: a real decoded RGB24 ndarray from camera/camera_session.py
+        -- never a placeholder. Receiving one is itself the only honest
+        basis for claiming Active (prompt.md: never show Active when the
+        camera isn't actually providing frames)."""
+        self._camera_preview_widget.set_frame(frame)
+        self._camera_preview_status_dot.setState(StatusState.CONNECTED)
+        self._camera_preview_status_text.setText("Active")
+
+    def clear_camera_preview(self) -> None:
+        self._camera_preview_widget.clear_frame()
+
+    def set_camera_preview_label(self, camera_name: str) -> None:
+        self._camera_preview_label.setText(f"Camera: {camera_name}")
+
+    def set_camera_preview_status_connecting(self) -> None:
+        self._camera_preview_status_dot.setState(StatusState.CONNECTING)
+        self._camera_preview_status_text.setText("Connecting…")
+
+    def set_camera_preview_status_disabled(self) -> None:
+        self._camera_preview_status_dot.setState(StatusState.DISCONNECTED)
+        self._camera_preview_status_text.setText("Disabled")
+        self.clear_camera_preview()
+
+    def set_camera_preview_status_disconnected(self) -> None:
+        self._camera_preview_status_dot.setState(StatusState.DISCONNECTED)
+        self._camera_preview_status_text.setText("Disconnected")
+        self.clear_camera_preview()
+        self.set_camera_preview_label("—")
 
     def _on_record_button_toggled(self, checked: bool) -> None:
         self._pause_button.setEnabled(checked)

@@ -11,3 +11,23 @@ dist/
 .mypy_cache/
 .ruff_cache/
 *.log
+
+# Packaging output (PyInstaller exe, MSI installer) -- already covered by
+# dist/ above when built to the default location, listed explicitly too in
+# case packaging/build_msi.py or a manual build is pointed elsewhere.
+*.msi
+*.wixobj
+*.wixpdb
+
+# Downloaded WiX Toolset binaries (packaging/build_msi.py fetches these on
+# first run) -- a large third-party binary blob, not source, not committed.
+packaging/.wix-tools/
+
+# OS/editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+.claude

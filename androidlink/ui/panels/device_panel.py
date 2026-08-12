@@ -20,6 +20,7 @@ from androidlink.streaming.protocol import (
     AUDIO_SOURCE_MIC_VOICE_RECOGNITION,
 )
 from androidlink.ui.panels.base_panel import BasePanel
+from androidlink.ui.widgets.audio_level_meter import AudioLevelMeter
 from androidlink.ui.widgets.slider_labeled import LabeledSlider
 from androidlink.ui.widgets.status_dot import StatusDot, StatusState
 from androidlink.ui.widgets.toggle_switch import ToggleSwitch
@@ -111,19 +112,6 @@ class DevicePanel(BasePanel):
         # "never rendered yet" -- distinct from an empty tuple ("rendered,
         # currently zero devices"), so the very first render always runs.
         self._last_device_list_signature: tuple | None = None
-
-        header_row = QWidget()
-        header_layout = QHBoxLayout(header_row)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.addStretch(1)
-        self._refresh_button = QPushButton("⟳ Refresh")
-        self._refresh_button.setToolTip(
-            "Scan ADB for connected devices right now, instead of waiting for "
-            "the next automatic check"
-        )
-        self._refresh_button.clicked.connect(self._device_manager.refresh_now)
-        header_layout.addWidget(self._refresh_button)
-        self.content_layout.addWidget(header_row)
 
         self._adb_status_label = QLabel()
         self._adb_status_label.setProperty("role", "placeholder")
@@ -360,6 +348,31 @@ class DevicePanel(BasePanel):
         mute_layout.addStretch(1)
         mute_layout.addWidget(self._mic_mute_toggle)
         layout.addWidget(mute_row)
+
+        level_label = QLabel("Input Level")
+        level_label.setProperty("role", "muted")
+        layout.addWidget(level_label)
+        self._mic_level_meter = AudioLevelMeter()
+        self._mic_level_meter.setToolTip(
+            "Real-time input level from the Android microphone (RMS, smoothed) -- "
+            "only moves while Mic is on and audio is actually arriving"
+        )
+        layout.addWidget(self._mic_level_meter)
+
+        mic_status_row = QWidget()
+        mic_status_layout = QHBoxLayout(mic_status_row)
+        mic_status_layout.setContentsMargins(0, 0, 0, 0)
+        mic_status_layout.setSpacing(6)
+        mic_status_title = QLabel("Microphone:")
+        mic_status_title.setProperty("role", "muted")
+        self._mic_status_dot = StatusDot(StatusState.DISCONNECTED)
+        self._mic_status_text = QLabel("Disabled")
+        self._mic_status_text.setProperty("role", "mono")
+        mic_status_layout.addWidget(mic_status_title)
+        mic_status_layout.addWidget(self._mic_status_dot)
+        mic_status_layout.addWidget(self._mic_status_text)
+        mic_status_layout.addStretch(1)
+        layout.addWidget(mic_status_row)
 
         self._mic_status_label = QLabel()
         self._mic_status_label.setProperty("role", "muted")
@@ -600,6 +613,10 @@ class DevicePanel(BasePanel):
     def _on_camera_selection_changed(self, _index: int) -> None:
         camera = self._camera_combo.currentData()
         if camera is not None:
+            # CameraController's own handler for this signal updates the
+            # Camera Live Preview's label and clears its stale frame (via
+            # the safe stop -> start restart path) -- see camera_controller
+            # .py's _on_camera_selection_changed().
             self.camera_selection_changed.emit(camera.camera_id)
             self._populate_fps_combo_for_current_camera()
 
@@ -627,6 +644,9 @@ class DevicePanel(BasePanel):
         self._camera_fps_combo.setEnabled(False)
         self._camera_status_label.setText("Detecting cameras...")
         self._camera_status_label.show()
+        # The Camera Live Preview itself (now in the Status panel's right-
+        # side bar) is reset by CameraController._on_active_device_changed(),
+        # which reacts to this same device-disconnect event independently.
 
     def set_camera_list(self, cameras: list[CameraInfo]) -> CameraInfo | None:
         """Populates the Camera dropdown once detection finishes (prompt.md
@@ -670,6 +690,10 @@ class DevicePanel(BasePanel):
         self._camera_status_label.hide()
         self._feature_toggles["Camera"].setEnabled(True)
         self._feature_toggles["Camera"].setToolTip("Expose the Android camera as a Windows webcam")
+        # setCurrentIndex(0) above was blockSignals()-guarded, so
+        # _on_camera_selection_changed() never fired -- the caller
+        # (CameraController._on_cameras_listed()) uses this return value to
+        # set the Camera Live Preview's "Camera: ..." label itself.
         return cameras[0]
 
     def select_camera_by_id(self, camera_id: str, fps: int) -> None:
@@ -751,6 +775,38 @@ class DevicePanel(BasePanel):
         self._mic_volume_slider.setEnabled(False)
         self._mic_mute_toggle.setEnabled(False)
         self._mic_status_label.hide()
+        self.set_mic_status_disconnected()
+
+    def set_mic_level(self, level: float) -> None:
+        """level: a real measured RMS-derived value in [0, 1] from the
+        actual incoming microphone PCM (audio/level_meter.py) -- never a
+        simulated/random animation."""
+        self._mic_level_meter.set_level(level)
+
+    def set_mic_status_connecting(self) -> None:
+        self._mic_status_dot.setState(StatusState.CONNECTING)
+        self._mic_status_text.setText("Connecting…")
+
+    def set_mic_status_active(self) -> None:
+        self._mic_status_dot.setState(StatusState.CONNECTED)
+        self._mic_status_text.setText("Active")
+
+    def set_mic_status_no_signal(self) -> None:
+        """The mic session is running but no real decoded audio has arrived
+        recently (see mic_controller.py's staleness timer) -- distinct from
+        Active so the UI never claims audio is flowing when it isn't."""
+        self._mic_status_dot.setState(StatusState.CONNECTING)
+        self._mic_status_text.setText("No Signal")
+
+    def set_mic_status_disabled(self) -> None:
+        self._mic_status_dot.setState(StatusState.DISCONNECTED)
+        self._mic_status_text.setText("Disabled")
+        self._mic_level_meter.reset()
+
+    def set_mic_status_disconnected(self) -> None:
+        self._mic_status_dot.setState(StatusState.DISCONNECTED)
+        self._mic_status_text.setText("Disconnected")
+        self._mic_level_meter.reset()
 
     def show_mic_connection_failed(self, message: str) -> None:
         mic_toggle = self._feature_toggles["Mic"]

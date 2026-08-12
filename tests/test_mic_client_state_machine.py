@@ -100,6 +100,44 @@ def test_full_handshake_decodes_and_reports_virtual_mic_unavailable(client, monk
     assert len(client._recv_buffer) == 0
 
 
+def test_audio_level_updated_reports_a_real_nonzero_level_for_real_audio(client, monkeypatch):
+    """The Device panel's mic level meter reads this signal -- must be
+    derived from the real decoded fixture audio, not simulated."""
+    real_outputs = QMediaDevices.audioOutputs()
+    non_cable_outputs = [
+        d for d in real_outputs
+        if "cable" not in d.description().lower() and "voicemeeter" not in d.description().lower()
+    ]
+    monkeypatch.setattr(QMediaDevices, "audioOutputs", staticmethod(lambda: non_cable_outputs))
+
+    extradata, packets = _real_opus_packets_and_extradata()
+    stream = _build_synthetic_mic_stream(b"opus", extradata, packets)
+
+    levels = []
+    client.audio_level_updated.connect(levels.append)
+
+    client._recv_buffer.extend(stream)
+    client._process_buffer()
+
+    assert levels  # at least one real packet was decoded into PCM
+    assert all(0.0 <= level <= 1.0 for level in levels)
+    assert any(level > 0.0 for level in levels)  # the fixture isn't pure digital silence
+
+
+def test_stop_is_idempotent(client):
+    """See test_video_client_state_machine.py's equivalent -- a second
+    stop() call must be a genuine no-op, not re-emit stopped (which could
+    trigger an unwanted second _start_mic())."""
+    stopped_events = []
+    client.stopped.connect(lambda: stopped_events.append(1))
+
+    client.stop()
+    client.stop()
+    client.stop()
+
+    assert stopped_events == [1]
+
+
 def test_unrecognized_codec_id_degrades_to_audio_unavailable_instead_of_crashing(client):
     """Same regression as test_audio_client_state_machine.py's equivalent --
     MicClient shares the same decode_audio_header() call, previously

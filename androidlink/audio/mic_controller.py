@@ -1,6 +1,7 @@
 import logging
+import time
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 
 from androidlink.audio.mic_session import MicSession
 from androidlink.device.manager import DeviceManager
@@ -8,9 +9,18 @@ from androidlink.settings.manager import SettingsManager
 from androidlink.streaming.controller import SERVER_JAR_RELATIVE_PATH
 from androidlink.streaming.protocol import AUDIO_SOURCE_MIC
 from androidlink.ui.panels.device_panel import DevicePanel
+from androidlink.utils import crash_state
 from androidlink.utils.platform import get_resource_path
 
 logger = logging.getLogger(__name__)
+
+# How long a session can go without a real decoded PCM packet before the
+# meter honestly reports "No Signal" instead of a stale "Active" -- must be
+# comfortably longer than normal packet spacing (Opus/AAC frames arrive
+# every ~20-40ms) so ordinary jitter never trips it, but short enough that a
+# genuinely stalled pipeline is caught quickly.
+_NO_SIGNAL_TIMEOUT_S = 2.0
+_STATUS_CHECK_INTERVAL_MS = 1000
 
 
 class MicController(QObject):
@@ -32,6 +42,19 @@ class MicController(QObject):
         self._device_panel = device_panel
         self._settings_manager = settings_manager
         self._session: MicSession | None = None
+        self._mic_active_session = False  # True between _start_mic() and _stop_mic()
+        self._last_level_time: float | None = None
+
+        # Polls whether real audio_level_updated emissions have actually
+        # kept arriving (see _on_audio_level_updated()/_check_signal_
+        # staleness()) -- the honest way to tell "No Signal" (session
+        # running, nothing decoded in a while) apart from "Active" (session
+        # running, genuinely receiving audio), matching how status_panel.py/
+        # renderer.py already use a QTimer for periodic real-measurement
+        # checks rather than trusting a one-shot "started" signal forever.
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(_STATUS_CHECK_INTERVAL_MS)
+        self._status_timer.timeout.connect(self._check_signal_staleness)
 
         settings = settings_manager.settings
         self._audio_source = settings.microphone.audio_source
@@ -64,6 +87,7 @@ class MicController(QObject):
     def _on_active_device_changed(self, device) -> None:
         if device is None:
             self._stop_mic()
+            self._device_panel.set_mic_status_disconnected()
 
     def _on_mic_toggled(self, enabled: bool) -> None:
         if enabled:
@@ -107,6 +131,14 @@ class MicController(QObject):
         self._settings_manager.save()
 
     def _start_mic(self) -> None:
+        if self._session is not None:
+            # See streaming/controller.py's CastingController._start_casting()
+            # for why this guard exists -- never let a second session run
+            # alongside a live one.
+            logger.warning("_start_mic() called while a session was already active; restarting instead")
+            self._restart_mic_if_active()
+            return
+
         device = self._device_manager.active_device
         adb_path = self._device_manager.adb_path
         if device is None or adb_path is None:
@@ -125,20 +157,105 @@ class MicController(QObject):
         session.connection_failed.connect(self._on_connection_failed)
         session.audio_unavailable.connect(self._on_audio_unavailable)
         session.virtual_mic_unavailable.connect(self._on_virtual_mic_unavailable)
+        session.audio_level_updated.connect(self._on_audio_level_updated)
         self._session = session
+        self._mic_active_session = True
+        self._last_level_time = None
+        self._status_timer.start()
+        self._device_panel.set_mic_status_connecting()
+        crash_state.update("mic", state="starting", audio_source=self._audio_source)
         session.start()
         session.set_volume(self._volume / 100)
         session.set_muted(self._muted)
 
     def _stop_mic(self) -> None:
         if self._session is not None:
-            self._session.stop()
+            session = self._session
             self._session = None
+            session.stop()
+            self._defer_session_cleanup(session)
+            crash_state.update("mic", state="stopped")
+        self._mic_active_session = False
+        self._status_timer.stop()
+        self._device_panel.set_mic_status_disabled()
+
+    @staticmethod
+    def _defer_session_cleanup(session: MicSession) -> None:
+        """Mirrors streaming/controller.py's CastingController._defer_
+        session_cleanup() -- severs every signal connection this specific
+        session has into the controller the moment it's being torn down, so
+        a callback still in flight from its worker thread can never run
+        against a since-replaced (or since-cleared) self._session -- deferred
+        to the next event-loop tick (never synchronously), since the caller
+        (_stop_mic(), _on_connection_failed()) can itself be running from
+        inside one of `session`'s own signal handlers. Disconnecting a
+        signal while that signal's own emission is still active is a
+        reentrant pattern that can cause real, hard (non-Python-traceback)
+        crashes across the PySide6/shiboken C++ boundary -- see
+        streaming/controller.py's crash investigation note for the full
+        story.
+
+        deleteLater() is NOT scheduled on this same immediate timer --
+        MicSession owns an un-parented worker QThread (mic_session.py) that
+        keeps running real teardown (killing the scrcpy-server process,
+        closing the virtual mic sink) for a while after stop() merely
+        queues the request to it. Destroying the MicSession wrapper before
+        that thread has actually finished is a hard native Qt crash
+        ("QThread: Destroyed while thread is still running"), which is
+        exactly what an immediate deleteLater() here risked -- see
+        streaming/controller.py's crash investigation finding #2 for the
+        full story. Instead, deleteLater() is wired to the session's own
+        `stopped` signal (left connected below), which only fires once the
+        worker thread's teardown has genuinely completed -- MicSession's
+        own teardown and _restart_mic_if_active()'s restart-chaining both
+        still need `stopped` too."""
+        def _cleanup() -> None:
+            for signal in (
+                session.connection_failed,
+                session.audio_unavailable,
+                session.virtual_mic_unavailable,
+                session.audio_level_updated,
+            ):
+                try:
+                    signal.disconnect()
+                except (TypeError, RuntimeError):
+                    pass  # nothing was connected
+
+        QTimer.singleShot(0, _cleanup)
+        try:
+            session.stopped.connect(session.deleteLater)
+        except (TypeError, RuntimeError):
+            pass  # session is already gone -- nothing to schedule
+
+    def _on_audio_level_updated(self, level: float) -> None:
+        if self._session is None:
+            return  # a straggling emission from a session that's already been stopped
+        self._last_level_time = time.monotonic()
+        self._device_panel.set_mic_level(level)
+        self._device_panel.set_mic_status_active()
+
+    def _check_signal_staleness(self) -> None:
+        if not self._mic_active_session:
+            return
+        stale = self._last_level_time is None or (
+            time.monotonic() - self._last_level_time > _NO_SIGNAL_TIMEOUT_S
+        )
+        if stale:
+            self._device_panel.set_mic_status_no_signal()
+            self._device_panel.set_mic_level(0.0)
 
     def _on_connection_failed(self, message: str) -> None:
         logger.warning("Microphone session failed: %s", message)
+        crash_state.update("mic", state="connection_failed", message=message)
         self._device_panel.show_mic_connection_failed(message)
-        self._session = None
+        if self._session is not None:
+            session = self._session
+            self._session = None
+            session.stop()
+            self._defer_session_cleanup(session)
+        self._mic_active_session = False
+        self._status_timer.stop()
+        self._device_panel.set_mic_status_disabled()
 
     def _on_audio_unavailable(self, is_error: bool) -> None:
         logger.warning("Android microphone unavailable (error=%s)", is_error)

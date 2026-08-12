@@ -30,20 +30,26 @@ from androidlink.settings.manager import SettingsManager
 from androidlink.streaming.controller import CastingController
 from androidlink.ui.panels.device_panel import DevicePanel
 from androidlink.ui.panels.screen_panel import ScreenPanel
+from androidlink.ui.panels.status_panel import StatusPanel
 
 
 class _FakeSession(QObject):
     stopped = Signal()
-    # The rest only matter to CastingController's fuller session interface
-    # (_disconnect_session_callbacks() severs these on stop -- see
-    # test_control_state_sync.py) -- Camera/MicController's real session
-    # types don't have them, but this one fake stands in for all three.
+    # The rest only matter to each controller's fuller session interface --
+    # every controller's _disconnect_session_callbacks() severs its own
+    # session's signals on stop (see test_control_state_sync.py), and this
+    # one fake stands in for CastingSession/CameraSession/MicSession alike,
+    # so it carries the union of all three's signals even though any given
+    # real session type only has some of them.
     session_started = Signal(int, int)
     frame_available = Signal()
     connection_failed = Signal(str)
     audio_unavailable = Signal(bool)
     audio_pcm_available = Signal(bytes)
     stats_updated = Signal(object)
+    virtual_camera_unavailable = Signal(str)
+    virtual_mic_unavailable = Signal(str)
+    audio_level_updated = Signal(float)
 
     def __init__(self) -> None:
         super().__init__()
@@ -101,7 +107,9 @@ def _make_camera_controller(qtbot, tmp_path) -> CameraController:
     device_manager = DeviceManager()
     device_panel = DevicePanel(device_manager)
     qtbot.addWidget(device_panel)
-    return CameraController(device_manager, device_panel, settings_manager)
+    status_panel = StatusPanel()
+    qtbot.addWidget(status_panel)
+    return CameraController(device_manager, device_panel, status_panel, settings_manager)
 
 
 def test_camera_restart_waits_for_old_session_to_report_stopped(qtbot, tmp_path):

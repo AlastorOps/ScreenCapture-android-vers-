@@ -17,6 +17,7 @@ from androidlink.settings.manager import SettingsManager
 from androidlink.streaming.controller import CastingController
 from androidlink.ui.panels.device_panel import DevicePanel
 from androidlink.ui.panels.screen_panel import ScreenPanel
+from androidlink.ui.panels.status_panel import StatusPanel
 
 
 def _settings_manager(tmp_path) -> SettingsManager:
@@ -132,8 +133,10 @@ def test_camera_controller_restores_persisted_camera_selection(qtbot, tmp_path):
     device_manager = DeviceManager()
     device_panel = DevicePanel(device_manager)
     qtbot.addWidget(device_panel)
+    status_panel = StatusPanel()
+    qtbot.addWidget(status_panel)
 
-    controller = CameraController(device_manager, device_panel, settings_manager)
+    controller = CameraController(device_manager, device_panel, status_panel, settings_manager)
 
     cameras = [
         CameraInfo(camera_id="0", facing="back", width=1920, height=1080, fps_options=(30, 60)),
@@ -150,7 +153,9 @@ def test_camera_controller_persists_selection_change(qtbot, tmp_path):
     device_manager = DeviceManager()
     device_panel = DevicePanel(device_manager)
     qtbot.addWidget(device_panel)
-    controller = CameraController(device_manager, device_panel, settings_manager)
+    status_panel = StatusPanel()
+    qtbot.addWidget(status_panel)
+    controller = CameraController(device_manager, device_panel, status_panel, settings_manager)
 
     controller._on_camera_selection_changed("2")
     controller._on_camera_fps_changed(30)

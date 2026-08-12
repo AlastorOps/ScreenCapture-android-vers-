@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- App-tile background, matching the app's own default dark theme
+       background (ui/themes/palette.py's bg_window="#0e0f12"), rounded to
+       match the Windows 11 Fluent app-icon convention. -->
+  <rect x="0" y="0" width="256" height="256" rx="48" ry="48" fill="#0e0f12" />
+
+  <!-- Laptop: light outline so it reads clearly against the dark tile. -->
+  <rect x="60" y="150" width="136" height="20" rx="6" ry="6" fill="#e8eaed" />
+  <rect x="52" y="66" width="152" height="100" rx="10" ry="10" fill="none" stroke="#e8eaed" stroke-width="8" />
+  <rect x="66" y="80" width="124" height="72" rx="4" ry="4" fill="#1b1e24" />
+
+  <!-- Android robot, peeking up from behind the laptop screen: classic
+       Android green (#3DDC84), the universally recognized "Android" color,
+       so the icon reads as "Android + PC" at a glance even at small sizes. -->
+  <g>
+    <line x1="104" y1="60" x2="92" y2="38" stroke="#3DDC84" stroke-width="7" stroke-linecap="round" />
+    <line x1="152" y1="60" x2="164" y2="38" stroke="#3DDC84" stroke-width="7" stroke-linecap="round" />
+    <circle cx="92" cy="38" r="7" fill="#3DDC84" />
+    <circle cx="164" cy="38" r="7" fill="#3DDC84" />
+
+    <path d="M 88 92 A 40 40 0 0 1 168 92 Z" fill="#3DDC84" />
+
+    <circle cx="112" cy="72" r="8" fill="#0e0f12" />
+    <circle cx="144" cy="72" r="8" fill="#0e0f12" />
+  </g>
+</svg>

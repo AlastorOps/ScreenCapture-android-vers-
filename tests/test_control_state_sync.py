@@ -222,14 +222,23 @@ def test_devices_changed_alone_does_not_touch_control_state(qtbot, tmp_path, mon
 def test_stale_session_callbacks_are_disconnected_on_stop(qtbot, tmp_path, monkeypatch):
     """Item 3: a signal still in flight from a session that's already being
     torn down must not be able to reach the controller and affect whatever
-    session (if any) replaced it -- session_started/frame_available/etc. are
-    fully disconnected from a session the moment _stop_casting() runs it.
+    session (if any) replaced it. _defer_session_cleanup() disconnects
+    session_started/frame_available/etc. *and* schedules the session object
+    itself for deletion (deleteLater()) -- both deferred by one event-loop
+    tick (see that method's docstring for why it can't be synchronous:
+    disconnecting a signal from within that exact signal's own currently-
+    executing handler is a reentrant pattern that can crash across the
+    PySide6/shiboken C++ boundary).
 
-    Proven via an observable side effect (screen_panel.show_placeholder(),
-    which _on_connection_failed() calls) rather than re-checking
-    controller._session: _on_connection_failed() sets that to None too, so
-    it would stay None either way and wouldn't actually catch a regression
-    where the stale callback still fired.
+    Once that deferred tick has actually run (qtbot.wait below), a stale
+    emission on the old session object has exactly two possible outcomes,
+    both of which prove it's inert -- there is no third, unsafe outcome:
+    (a) the signal is disconnected but the object hasn't been deleted yet
+    -> emit() succeeds but reaches no handler, or (b) deleteLater() has
+    already taken effect -> emit() itself raises "Signal source has been
+    deleted", which is Qt refusing to touch a destroyed object rather than
+    silently corrupting anything. Either way, _on_connection_failed() must
+    never actually run for it.
     """
     monkeypatch.setattr(controller_module, "CastingSession", _FakeCastingSession)
     _FakeCastingSession.instances = []
@@ -239,14 +248,23 @@ def test_stale_session_callbacks_are_disconnected_on_stop(qtbot, tmp_path, monke
     old_session = _FakeCastingSession.instances[-1]
 
     device_manager.disconnect_device()  # stops (and should disconnect) old_session
+    qtbot.wait(10)  # let the deferred (QTimer.singleShot(0, ...)) cleanup tick actually run
 
     placeholder_calls = []
     monkeypatch.setattr(controller._screen_panel, "show_placeholder", placeholder_calls.append)
 
     # Straggling emissions from the now-stopped session's worker thread --
-    # must be inert: no handler left connected to react to any of them.
-    old_session.session_started.emit(1920, 1080)
-    old_session.frame_available.emit()
-    old_session.connection_failed.emit("late failure from the old session")
+    # must be inert: no handler left connected to react to any of them,
+    # regardless of whether the object has been fully deleted yet (see
+    # docstring above for why both outcomes here are acceptable).
+    for emit_call in (
+        lambda: old_session.session_started.emit(1920, 1080),
+        lambda: old_session.frame_available.emit(),
+        lambda: old_session.connection_failed.emit("late failure from the old session"),
+    ):
+        try:
+            emit_call()
+        except RuntimeError as exc:
+            assert "deleted" in str(exc).lower()
 
-    assert placeholder_calls == []  # _on_connection_failed() never ran
+    assert placeholder_calls == []  # _on_connection_failed() never actually ran

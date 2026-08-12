@@ -4,10 +4,10 @@ asynchronously that the list rows don't even display, e.g. getprop/dumpsys
 metadata landing a few seconds after connect -- used to tear down and
 rebuild the entire device list unconditionally. DevicePanel now only does
 that when what the list would actually show has changed (prompt.md: "old
-list == new list -> do nothing"), and a manual Refresh button exists
-(wired directly to DeviceManager.refresh_now(), matching the existing
-Disconnect button's pattern) so a scan can be explicitly requested rather
-than only ever happening automatically.
+list == new list -> do nothing"). Automatic polling (DeviceManager's own
+timer) still drives detection; there is no manual Refresh button anymore
+(it called DeviceManager.refresh_now(), which was a redundant no-op most of
+the time given the automatic poll -- removed rather than fixed).
 """
 
 import os
@@ -24,18 +24,6 @@ def _make_panel(qtbot) -> DevicePanel:
     panel = DevicePanel(device_manager)
     qtbot.addWidget(panel)
     return panel
-
-
-def test_refresh_button_calls_device_manager_refresh_now(qtbot, monkeypatch):
-    device_manager = DeviceManager()
-    calls = []
-    monkeypatch.setattr(device_manager, "refresh_now", lambda: calls.append(1))
-    panel = DevicePanel(device_manager)
-    qtbot.addWidget(panel)
-
-    panel._refresh_button.click()
-
-    assert calls == [1]
 
 
 def test_identical_devices_changed_emission_does_not_rebuild_the_list(qtbot, monkeypatch):
